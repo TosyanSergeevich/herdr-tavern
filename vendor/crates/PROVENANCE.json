@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "source": "Official crates.io release archives from static.crates.io",
+  "checksum_source": "herdr Cargo.lock at 2563803dca97c040beaf3dc3acdcb5a3221b4238",
+  "modifications": [],
+  "packages": [
+    {
+      "name": "bincode",
+      "version": "2.0.1",
+      "archive_url": "https://static.crates.io/crates/bincode/bincode-2.0.1.crate",
+      "archive_sha256": "36eaf5d7b090263e8150820482d5d93cd964a81e4019913c972f4edcc6edb740",
+      "directory": "bincode-2.0.1",
+      "license": "MIT",
+      "license_file": "bincode-2.0.1/LICENSE.md"
+    },
+    {
+      "name": "bincode_derive",
+      "version": "2.0.1",
+      "archive_url": "https://static.crates.io/crates/bincode_derive/bincode_derive-2.0.1.crate",
+      "archive_sha256": "bf95709a440f45e986983918d0e8a1f30a9b1df04918fc828670606804ac3c09",
+      "directory": "bincode_derive-2.0.1",
+      "license": "MIT",
+      "license_file": "bincode_derive-2.0.1/LICENSE.md"
+    },
+    {
+      "name": "unty",
+      "version": "0.0.4",
+      "archive_url": "https://static.crates.io/crates/unty/unty-0.0.4.crate",
+      "archive_sha256": "6d49784317cd0d1ee7ec5c716dd598ec5b4483ea832a2dced265471cc0f690ae",
+      "directory": "unty-0.0.4",
+      "license": "MIT OR Apache-2.0",
+      "license_files": ["unty-0.0.4/LICENSE-MIT", "unty-0.0.4/LICENSE-APACHE"]
+    },
+    {
+      "name": "virtue",
+      "version": "0.0.18",
+      "archive_url": "https://static.crates.io/crates/virtue/virtue-0.0.18.crate",
+      "archive_sha256": "051eb1abcf10076295e815102942cc58f9d5e3b4560e46e53c21e8ff6f3af7b1",
+      "directory": "virtue-0.0.18",
+      "license": "MIT",
+      "license_file": "virtue-0.0.18/LICENSE.md"
+    },
+    {
+      "name": "libc",
+      "version": "0.2.190",
+      "archive_url": "https://static.crates.io/crates/libc/libc-0.2.190.crate",
+      "archive_sha256": "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78",
+      "directory": "libc-0.2.190",
+      "license": "MIT OR Apache-2.0",
+      "license_files": ["libc-0.2.190/LICENSE-MIT", "libc-0.2.190/LICENSE-APACHE"]
+    }
+  ]
+}

@@ -1,0 +1,36 @@
+Шрифты оболочки Herdr Tavern
+
+Справочный русский перевод, не официальный перевод правообладателей.
+Юридически исходная английская версия: InterfaceFonts.txt; при расхождениях
+она имеет приоритет. Исходные английские уведомления copyright сохранены ниже.
+
+Файлы сохранены в проекте по решению владельца от 19.10.2026
+с указанием исходного авторства и источников загрузки.
+Разрешение на распространение вместе с приложением и через публичный
+репозиторий НЕ подтверждено; владелец принимает этот риск.
+Шрифты исключены из Apache-2.0 собственного кода Tavern.
+При обращении правообладателя спорный файл будет удалён или заменён.
+Этот документ и ../NOTICE.ru (английский оригинал — ../NOTICE) фиксируют
+авторство и решение проекта, но не предоставляют лицензию и не заменяют
+разрешение правообладателя.
+
+FrizQuadrataC.ttf
+Семейство: FrizQuadrataCTT, Regular
+PostScript: FrizQuadrataC
+Copyright (c) 1990-1996 ParaGraph. All Rights Reserved.
+Friz Quadrata is a registered trade mark of International Typeface Corporation.
+Источник: https://fonts-online.ru/fonts/frizquadratactt
+Файл: https://fonts-online.ru/sites/default/files/2021-09/frizquadratac.ttf
+
+MorpheusAlt1Cyr.otf
+Семейство и PostScript: MorpheusAlt1Cyr
+Кириллическая адаптация; не подтверждённый оригинальный файл клиента WoW.
+Copyright (c) Gophmann A.L., 2006. All rights reserved.
+Источник: https://fonts-online.ru/fonts/morpheusalt1cyr
+Файл: https://fonts-online.ru/sites/default/files/2021-09/morpheusalt1cyr.otf
+
+Оба шрифта загружаются непосредственно из ресурсов приложения через CoreText.
+В системе не устанавливаются. Шрифт терминала Iosevka Custom тоже встроен,
+но имеет отдельную лицензию SIL OFL 1.1; см. IosevkaCustom.ru.txt
+(английский оригинал — IosevkaCustom.txt). Эти два декоративных шрифта
+не заменяют его.

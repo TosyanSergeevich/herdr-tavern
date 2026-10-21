@@ -1,0 +1,10 @@
+"installer.offer.title" = "Install herdr?";
+"installer.offer.message" = "herdr manages Tavern’s terminal sessions, processes, and agents. It was not found.\n\nWith your permission, Tavern will download the official herdr %@ release from GitHub and install it for Tavern at:\n%@\n\nNo administrator privileges are needed, and your shell settings will not be changed.";
+"installer.offer.install" = "Download and Install";
+"installer.progress.title" = "Installing herdr";
+"installer.progress.message" = "Downloading herdr %@ and verifying its SHA256 checksum…";
+"installer.error.title" = "herdr Installation Failed";
+"installer.error.message" = "Could not install herdr: %@";
+"installer.error.invalidResponse" = "The download server returned an invalid response.";
+"installer.error.http" = "The download server returned HTTP %ld.";
+"installer.error.checksum" = "The downloaded file’s SHA256 checksum does not match the official release. The file was not installed.";

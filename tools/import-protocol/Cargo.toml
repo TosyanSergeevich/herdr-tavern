@@ -1,0 +1,12 @@
+[package]
+name = "import-protocol"
+version.workspace = true
+edition.workspace = true
+license = "Apache-2.0"
+publish = false
+description = "Явное обновление заимствованных wire-типов herdr; не build script"
+
+[dependencies]
+syn = { version = "2", features = ["full"] }
+quote = "1"
+serde_json.workspace = true

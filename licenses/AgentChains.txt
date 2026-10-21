@@ -1,0 +1,30 @@
+Agent Chains — image provenance notice
+
+English original. Russian reference translation: AgentChains.ru.txt.
+
+Application resources:
+- Textures/AgentChainConnector.png — chain-connector@2x.png, 20x48 px, 10x24 pt.
+- Textures/AgentChainStrap.png — chain-strap@2x.png, 16x112 px, 8x56 pt.
+- Textures/AgentChainBelt.png — chain-belt@2x.png, 112x16 px, 56x8 pt.
+
+Imported on 2026-10-15 from the approved Tavern-Agent-Chain design.
+Generation source: xd://generate_image; provider openai-codex;
+model gpt-image-2-codex. Reference: a capture of an isolated Tavern window
+with test agents (Tavern QA), not extracted Warcraft materials.
+The chains were generated separately and are not Warcraft-derived resources.
+
+The original connector-source.webp and strap-source.webp and processed
+chain-connector-master.png and chain-strap-master.png are preserved in
+resources/Textures/Sources/AgentChains/ in the repository.
+Processing: crop to the large opaque object, LANCZOS downscaling, PNG RGBA.
+Runtime PNGs were imported without re-encoding, only renamed. A separate
+preparation recipe for the belt was not recorded; the finished belt image
+was imported from the same design.
+
+The user approved the visual design of two textured side chains behind the
+cards, with their ends covered by the frames. This is design approval, not a
+legal opinion or confirmation of redistribution rights. Terms of use for
+generated images are determined by the provider; no independent legal review
+has been conducted. This notice records provenance, but does not grant a
+separate license or apply the license terms of Warcraft or other third-party
+assets to these images.

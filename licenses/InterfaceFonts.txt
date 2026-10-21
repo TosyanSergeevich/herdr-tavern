@@ -1,0 +1,32 @@
+Herdr Tavern interface fonts
+
+English original. Russian reference translation: InterfaceFonts.ru.txt.
+
+The files were retained in the project by the owner's decision of 2026-10-19,
+with their original attribution and download sources identified.
+Permission to distribute them with the application and through a public
+repository is NOT confirmed; the owner accepts this risk.
+The fonts are excluded from the Apache-2.0 license of Tavern's original code.
+Upon a rights holder's request, the disputed file will be removed or replaced.
+This document and ../NOTICE record attribution and the project's decision,
+but grant no license and do not replace the rights holder's permission.
+
+FrizQuadrataC.ttf
+Family: FrizQuadrataCTT, Regular
+PostScript: FrizQuadrataC
+Copyright (c) 1990-1996 ParaGraph. All Rights Reserved.
+Friz Quadrata is a registered trade mark of International Typeface Corporation.
+Source: https://fonts-online.ru/fonts/frizquadratactt
+File: https://fonts-online.ru/sites/default/files/2021-09/frizquadratac.ttf
+
+MorpheusAlt1Cyr.otf
+Family and PostScript: MorpheusAlt1Cyr
+Cyrillic adaptation; not a verified original WoW client file.
+Copyright (c) Gophmann A.L., 2006. All rights reserved.
+Source: https://fonts-online.ru/fonts/morpheusalt1cyr
+File: https://fonts-online.ru/sites/default/files/2021-09/morpheusalt1cyr.otf
+
+Both fonts are loaded directly from the app's resources through CoreText.
+They are not installed system-wide. The Iosevka Custom terminal font is
+also bundled, but is separately licensed under SIL OFL 1.1; see
+IosevkaCustom.txt. These two decorative fonts do not replace it.

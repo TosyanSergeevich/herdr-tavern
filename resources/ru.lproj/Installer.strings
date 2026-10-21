@@ -1,0 +1,10 @@
+"installer.offer.title" = "Установить herdr?";
+"installer.offer.message" = "herdr управляет терминальными сессиями, процессами и агентами Tavern. Он не найден.\n\nС вашего разрешения Tavern скачает официальный релиз herdr %@ с GitHub и установит его для Tavern по пути:\n%@\n\nПрава администратора не нужны. Настройки оболочки не изменятся.";
+"installer.offer.install" = "Скачать и установить";
+"installer.progress.title" = "Установка herdr";
+"installer.progress.message" = "Загрузка herdr %@ и проверка контрольной суммы SHA256…";
+"installer.error.title" = "Не удалось установить herdr";
+"installer.error.message" = "Ошибка установки herdr: %@";
+"installer.error.invalidResponse" = "Сервер загрузки вернул некорректный ответ.";
+"installer.error.http" = "Сервер загрузки вернул HTTP %ld.";
+"installer.error.checksum" = "Контрольная сумма SHA256 загруженного файла не совпадает с официальным релизом. Файл не установлен.";

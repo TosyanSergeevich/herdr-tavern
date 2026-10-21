@@ -1,0 +1,23 @@
+/build/
+/target/
+.DS_Store
+__pycache__/
+*.py[cod]
+.venv/
+/venv/
+.agent-commit-message.*
+
+# Локальные настройки и секреты; обезличенные примеры можно хранить в Git.
+.env
+.env.*
+!.env.example
+!.env.sample
+*.p12
+*.pfx
+*.pem
+*.key
+id_rsa
+id_ed25519
+
+# Не возвращать полный концепт с личными данными.
+/resources/Textures/Sources/MetalConcept/Concept.png

@@ -1,0 +1,178 @@
+Herdr Tavern
+Copyright 2026 Herdr Tavern contributors.
+
+English original. Russian reference translation: NOTICE.ru.
+
+LICENSE SCOPE
+
+Herdr Tavern's original software, including Swift/Rust code, the C interface,
+Metal shaders, build tools, and documentation, is licensed under the Apache
+License, Version 2.0; the complete unmodified text is in LICENSE.
+Third-party components retain their own notices and terms. This NOTICE is
+informational and does not modify the Apache License.
+
+The project's Apache license does NOT cover files in resources/Fonts/,
+resources/Sounds/, resources/Textures/, or resources/Icons/, including masters
+and derived images. Their provenance and known terms are described below
+and in licenses/. Inclusion in the repository or app does not constitute
+a grant of third-party rights by this project.
+For resources without confirmed permission, this document grants no license
+to use, modify, distribute, or sublicense them.
+
+WORLD OF WARCRAFT SOUNDS
+
+World of Warcraft game sounds: Blizzard Entertainment, Inc.
+and/or the respective licensors. Rights to the original recordings remain
+with their rights holders; individual recording authorship is not established.
+World of Warcraft and Blizzard are trademarks of their respective owners.
+Tavern is not an official Blizzard product and claims no Blizzard endorsement.
+
+Files in resources/Sounds/:
+- iTellMessage.wav
+- igQuestFailed.wav
+- iQuestActivate.wav
+- TaurenExploration.wav
+- iUiInterfaceButtonA.wav
+- uSpellIconDrop.wav
+- iPlayerInviteA.wav
+- UI_Quest_ObjectiveComplete_01.wav
+
+According to the project owner, the set was downloaded from Wowhead:
+https://www.wowhead.com/
+Wowhead is identified as the download source, not the audio's author or licensor.
+The exact original download pages for all files have not been preserved.
+The following sources were separately identified for uSpellIconDrop.wav:
+https://www.wowhead.com/sound=689/interfacesound-cursordropobject
+https://wow.zamimg.com/sound-ids/live/enus/228/567524/uSpellIconDrop.ogg
+This sound's original OGG was converted to PCM WAV; format conversion does
+not change rights to the original recording.
+
+Rights holder and published terms:
+https://www.blizzard.com/
+https://www.blizzard.com/en-us/legal/28d5ebbf-c245-4408-8ba9-043dd5f056bf/legal-faq
+https://eu.forums.blizzard.com/en/wow/t/wow-user-interface-add-on-development-policy/1642/1
+
+Separate permission to distribute these recordings with Tavern has not been
+obtained. Inclusion in the app, attribution, or availability for download on
+Wowhead does not make them Apache-2.0, CC0, or freely licensed sounds.
+
+IOSEVKA CUSTOM
+
+Iosevka Custom, Version 34.9.0.
+Copyright 2015-2026, Renzhi Li (aka. Belleve Invis, belleve@typeof.net).
+The following four font files are bundled unchanged:
+resources/Fonts/IosevkaCustom-Medium.ttf
+resources/Fonts/IosevkaCustom-Bold.ttf
+resources/Fonts/IosevkaCustom-MediumOblique.ttf
+resources/Fonts/IosevkaCustom-BoldOblique.ttf
+
+These fonts are licensed under the SIL Open Font License, Version 1.1,
+not the project's Apache license. The OFL permits bundling and redistribution
+with software under its terms. The complete, unchanged English license is in
+licenses/IosevkaCustom.txt; a Russian reference translation is in
+licenses/IosevkaCustom.ru.txt. The English original remains authoritative.
+Upstream project:
+https://github.com/be5invis/Iosevka
+License:
+https://openfontlicense.org/
+
+INTERFACE FONTS
+
+resources/Fonts/FrizQuadrataC.ttf
+Family: FrizQuadrataCTT; PostScript: FrizQuadrataC.
+Copyright (c) 1990-1996 ParaGraph. All Rights Reserved.
+Friz Quadrata is a registered trade mark of International Typeface Corporation.
+Source and file information:
+https://fonts-online.ru/fonts/frizquadratactt
+https://fonts-online.ru/sites/default/files/2021-09/frizquadratac.ttf
+ParaType family page:
+https://www.paratype.com/fonts/pt/friz-quadrata
+A license for a different version of the family is not permission for this file.
+
+resources/Fonts/MorpheusAlt1Cyr.otf
+Cyrillic adaptation: MorpheusAlt1Cyr.
+Copyright (c) Gophmann A.L., 2006. All rights reserved.
+Source and file information:
+https://fonts-online.ru/fonts/morpheusalt1cyr
+https://fonts-online.ru/sites/default/files/2021-09/morpheusalt1cyr.otf
+A verified author's website or primary EULA for this adaptation has not been
+identified; the download directory is not identified as the rights holder
+or licensor.
+
+Both files retain their original attribution and are excluded from the
+project's Apache license. Permission to bundle them with the app and publicly
+distribute the original files is unconfirmed. See licenses/InterfaceFonts.txt.
+
+SYMBOLS NERD FONT
+
+resources/Fonts/SymbolsNerdFont-Regular.ttf — Symbols Only, Nerd Fonts 3.5.1.
+Copyright (c) 2014 Ryan L McIntyre.
+The supplier's MIT text is preserved unchanged in licenses/SymbolsNerdFont.txt.
+Official project:
+https://github.com/ryanoasis/nerd-fonts
+Included sets and their sources:
+https://github.com/ryanoasis/nerd-fonts/blob/v3.5.1/patched-fonts/NerdFontsSymbolsOnly/README.md
+
+The MIT file does not assert that the entire collection of glyphs is MIT-only.
+Upstream also lists CC BY 4.0, Apache-2.0, and OFL components; Font Logos is
+marked as unlicensed. Complete permissions and the legal composition of the
+entire set are unconfirmed; the project's Apache license does not replace them.
+
+VISUAL MATERIALS
+
+Artwork sources are retained under resources/Textures/Sources/,
+resources/Textures/TavernVisuals/sources/, and resources/Icons/Sources/.
+Known source information:
+- The plank atlas, bookmark, and hanging talismans were generated for Tavern
+  with OpenAI tools using project screenshots and concepts as references.
+  Runtime images are conversions or manually masked derivatives.
+- Button-family artwork was generated using a Tavern agent-settings
+  screenshot as a reference; redistribution and reference rights are unverified.
+- Sidebar artwork was generated from project concepts and screenshots.
+  The retained lantern crop inherits the origin of the earlier Tavern artwork;
+  independent rights verification has not been performed.
+- Image sources and terms for the agent-card chains are recorded in
+  licenses/AgentChains.txt.
+
+resources/Textures/TavernVisuals/sprites/glow.png, particle-core.png, and
+particle-soft.png are deterministic procedural radial-falloff shapes authored
+by the assistant with Pillow; no image-generation model or source image
+was used for these three sprites.
+Rights to the generated sources and their references have not been
+independently verified. Design approval and inclusion in the app are not
+confirmation of rights. Terms for generated materials depend on the
+applicable generation agreement and rights to reference materials. Not all
+provenance chains have been established; this NOTICE does not assign an author
+or a free license to unknown sources.
+
+PRESENTATION VIDEO
+
+docs/assets/tavern-trailer.mp4 contains recordings of herdr and Herdr Tavern.
+Music: "Medieval: Harvest Season" by RandomMind, published under CC0 1.0:
+https://opengameart.org/content/medieval-harvest-season
+https://creativecommons.org/publicdomain/zero/1.0/
+The recording is excerpted, with volume adjustment and fades.
+
+SOFTWARE COMPONENTS
+
+Herdr and the extracted protocol are Apache-2.0:
+https://github.com/herdrdev/herdr
+Provenance and the original license:
+crates/herdr-protocol/PROVENANCE.json and crates/herdr-protocol/LICENSE.
+The server startup adaptation is also credited in app/Connection.swift.
+Rust dependency notices: licenses/RustDependencies.txt.
+Vendored crate provenance: vendor/crates/PROVENANCE.json.
+Third-party development skills retain their own LICENSE/NOTICE files in
+.agents/skills/; this document does not relicense them.
+
+RIGHTS HOLDER REQUESTS
+
+The project owner has decided to retain the current WoW sounds and interface
+fonts with attribution and source references, accepting the risk of unconfirmed
+permissions. This is a decision by Tavern's owner, not permission from the
+rights holders. Disputed resources will be removed or replaced upon a rights
+holder's request. To contact the project, use Issues in Tavern's public
+repository and identify the resource, your rights to it, and the action
+requested. This is an additional contact channel, not a restriction on lawful
+remedies. Removal upon request does not exclude liability for earlier
+distribution and does not create permission for recipients or forks.

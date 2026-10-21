@@ -1,0 +1,16 @@
+[package]
+name = "tavern-client"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+herdr-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+libc = "0.2"
+# Сохраняет комментарии и оформление пользовательского config.toml при правках меню.
+toml_edit = "=0.22.27"

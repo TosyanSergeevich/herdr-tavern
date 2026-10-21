@@ -1,0 +1,33 @@
+{
+  "exceptions": [
+    "Leaf derives remove only JsonSchema; serde attributes and field/variant order remain unchanged",
+    "HashMap import and UNDERLINE_STYLE_SHIFT/MASK constants omitted with UI conversion helpers",
+    "Endpoint imports retain only ClientSurfaceSize; server factory and message helpers omitted",
+    "Runtime/TUI conversions, version check helper, server constructors and upstream test modules are not imported",
+    "AST token emission preserves doc attributes but omits ordinary comments; generated source headers added"
+  ],
+  "generator": "tools/import-protocol/src/main.rs",
+  "license": "Apache-2.0",
+  "license_file": "LICENSE",
+  "revision": "2563803dca97c040beaf3dc3acdcb5a3221b4238",
+  "schema_version": 1,
+  "selection": {
+    "endpoint": "Top-level use/const/struct/enum, default_true and EndpointClientHello codec validation",
+    "leaf_types": [
+      "WindowsKeyRecord",
+      "AgentStatus",
+      "ToastHerdrPosition"
+    ],
+    "wire": "Top-level use/const/struct/enum/type; trait impls for FramingError and CellData; deserialize_client_shell_agent_status, serialize_graphics_bytes, deserialize_graphics_bytes, write_message, read_message, read_exact_or_eof"
+  },
+  "sources": [
+    "src/protocol/wire.rs",
+    "src/protocol/endpoint.rs",
+    "src/input/model.rs",
+    "src/api/schema/common.rs",
+    "src/config/model.rs",
+    "LICENSE"
+  ],
+  "update_command": "cargo run --offline -p import-protocol -- UPSTREAM_CHECKOUT [EXPECTED_REVISION] [PROTOCOL_CRATE_DIR]",
+  "upstream": "https://github.com/herdrdev/herdr"
+}

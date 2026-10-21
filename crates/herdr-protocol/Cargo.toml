@@ -1,0 +1,11 @@
+[package]
+name = "herdr-protocol"
+version.workspace = true
+edition.workspace = true
+license = "Apache-2.0"
+description = "Самодостаточные wire-типы и framing herdr для клиента Tavern"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+bincode.workspace = true
