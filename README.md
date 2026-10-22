@@ -7,9 +7,9 @@ A native macOS client for **[herdr](https://github.com/herdrdev/herdr)** with a 
 > [!IMPORTANT]
 > **Independent, unofficial project.** Herdr Tavern is not affiliated with or endorsed by the herdr project or its maintainers. The word “herdr” in the name identifies the tool it works with, not an official connection. **[Original herdr repository →](https://github.com/herdrdev/herdr)**
 
-[![Real Tavern interface: OMP and Codex side by side, workspace tabs, and agent status cards in the neutral Guild Board project. Watch the trailer.](docs/assets/tavern-en.png)](docs/assets/tavern-trailer.mp4)
+https://github.com/user-attachments/assets/850a079e-4e12-4842-a6ab-5b34cc973784
 
-**[Watch the trailer — 30 seconds, with sound](docs/assets/tavern-trailer.mp4)** · English interface, Russian captions.
+**30 seconds, with sound.** English interface, Russian captions.
 
 ## Features
 
