@@ -22,6 +22,8 @@ https://github.com/user-attachments/assets/850a079e-4e12-4842-a6ab-5b34cc973784
 
 Closing the window leaves the herdr session running. Closing a pane or tab stops its processes and requires confirmation. Agent programs and model access are configured separately.
 
+Terminal history stays in herdr; Tavern keeps the current screen grid. Temporary receive objects are released after each event, while rendering reuses colors and batches adjacent background fills without reducing the redraw area.
+
 ## Build and run
 
 To build locally, you need **macOS 14+**, **Xcode Command Line Tools**, and **Rust stable with Cargo**. First [set up the local signing certificate](docs/SETUP.md#local-signing); keep it for future builds.

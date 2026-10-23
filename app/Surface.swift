@@ -333,7 +333,8 @@ final class SurfaceView: NSView, NSTextInputClient {
             let glyph = glyph(for: cell, columns: columns)
             context.saveGState(); context.translateBy(x: CGFloat(x) * cellWidth, y: CGFloat(y) * cellHeight + ascent)
             context.scaleBy(x: 1, y: -1)
-            context.setFillColor(foreground.cgColor); context.setStrokeColor(foreground.cgColor)
+            let color = foreground.cgColor
+            context.setFillColor(color); context.setStrokeColor(color)
             context.textMatrix = glyph.matrix
             context.textPosition = .zero; CTLineDraw(glyph.line, context); context.restoreGState()
         }
@@ -364,14 +365,33 @@ final class SurfaceView: NSView, NSTextInputClient {
         // Глиф слева может заходить в пустую ячейку внутри dirtyRect.
         let x0 = max(0, Int(dirtyRect.minX / cellWidth) - 1), x1 = min(width, Int(ceil(dirtyRect.maxX / cellWidth)))
         guard y0 < y1, x0 < x1 else { return }
-        for y in y0..<y1 { for x in x0..<x1 {
-            colors(cells[y * width + x]).1.setFill()
-            NSRect(x: CGFloat(x) * cellWidth, y: CGFloat(y) * cellHeight, width: cellWidth, height: cellHeight).fill()
-        } }
+        // Переиспользуем только последний стиль в пределах draw, без растущего кэша.
+        var previousStyle: (UInt32, UInt32, UInt16)?
+        var previousColors: (NSColor, NSColor)?
+        func drawingColors(_ cell: TerminalCell) -> (NSColor, NSColor) {
+            let style = (cell.foreground, cell.background, cell.modifier & 66)
+            if let previousStyle, let previousColors, previousStyle == style { return previousColors }
+            let resolved = colors(cell)
+            previousStyle = style; previousColors = resolved
+            return resolved
+        }
+        for y in y0..<y1 {
+            var start = x0
+            var background = drawingColors(cells[y * width + start]).1
+            for x in (x0 + 1)...x1 {
+                let next = x < x1 ? drawingColors(cells[y * width + x]).1 : nil
+                if next != background {
+                    background.setFill()
+                    NSRect(x: CGFloat(start) * cellWidth, y: CGFloat(y) * cellHeight,
+                           width: CGFloat(x - start) * cellWidth, height: cellHeight).fill()
+                    if let next { background = next; start = x }
+                }
+            }
+        }
         drawImages(negative: true, context: context)
         for y in y0..<y1 { for x in x0..<x1 {
             let index = y * width + x
-            drawGlyph(at: index, foreground: colors(cells[index]).0, context: context)
+            drawGlyph(at: index, foreground: drawingColors(cells[index]).0, context: context)
         } }
         drawImages(negative: false, context: context)
         for y in y0..<y1 {

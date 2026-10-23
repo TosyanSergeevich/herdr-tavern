@@ -80,26 +80,31 @@ final class RustConnection {
         calls.enter()
         DispatchQueue.global(qos: .userInitiated).async { [self] in
             defer { calls.leave() }
-            while true {
-                var event: OpaquePointer?, error: UnsafeMutablePointer<CChar>?
-                let result = tavern_client_next_event(pointer, 1000, &event, &error)
-                if result == 0 { continue }
-                if result == 2 { break }
-                if result < 0 {
-                    let message = ownedString(error)
-                    DispatchQueue.main.sync { receive(.failure(NativeError.message(message))) }
-                    break
+            var receiving = true
+            while receiving {
+                // Foundation создаёт временные объекты; worker живёт всё соединение.
+                receiving = autoreleasepool {
+                    var event: OpaquePointer?, error: UnsafeMutablePointer<CChar>?
+                    let result = tavern_client_next_event(pointer, 1000, &event, &error)
+                    if result == 0 { return true }
+                    if result == 2 { return false }
+                    if result < 0 {
+                        let message = ownedString(error)
+                        DispatchQueue.main.sync { receive(.failure(NativeError.message(message))) }
+                        return false
+                    }
+                    guard let event else {
+                        DispatchQueue.main.sync { receive(.failure(NativeError.message(L("core.connection.emptyEvent")))) }
+                        return false
+                    }
+                    let decoded: Result<NativeEvent, Error>
+                    do { decoded = .success(try NativeEvent(event)) } catch { decoded = .failure(error) }
+                    tavern_event_free(event)
+                    // Bounded hand-off: reader never queues unbounded full surfaces. No UI
+                    // thread waits for this worker; detach interrupts next_event separately.
+                    DispatchQueue.main.sync { receive(decoded) }
+                    return true
                 }
-                guard let event else {
-                    DispatchQueue.main.sync { receive(.failure(NativeError.message(L("core.connection.emptyEvent")))) }
-                    break
-                }
-                let decoded: Result<NativeEvent, Error>
-                do { decoded = .success(try NativeEvent(event)) } catch { decoded = .failure(error) }
-                tavern_event_free(event)
-                // Bounded hand-off: reader never queues unbounded full surfaces. No UI
-                // thread waits for this worker; detach interrupts next_event separately.
-                DispatchQueue.main.sync { receive(decoded) }
             }
             close()
         }
