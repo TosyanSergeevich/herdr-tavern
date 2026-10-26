@@ -8,17 +8,31 @@
 
 Область действия
 ----------------
-Это уведомление относится только к следующим четырём файлам из
+Это уведомление относится только к следующим восемнадцати файлам из
 resources/Fonts/, поставляемым с Herdr Tavern и загружаемым непосредственно
 из ресурсов приложения:
 
 Файл                              Имя PostScript
+IosevkaCustom-Thin.ttf             Iosevka-Custom-Thin
+IosevkaCustom-ThinOblique.ttf      Iosevka-Custom-Thin-Oblique
+IosevkaCustom-ExtraLight.ttf       Iosevka-Custom-Extralight
+IosevkaCustom-ExtraLightOblique.ttf Iosevka-Custom-Extralight-Oblique
+IosevkaCustom-Light.ttf            Iosevka-Custom-Light
+IosevkaCustom-LightOblique.ttf     Iosevka-Custom-Light-Oblique
+IosevkaCustom-ExtraBold.ttf        Iosevka-Custom-Extrabold
+IosevkaCustom-ExtraBoldOblique.ttf Iosevka-Custom-Extrabold-Oblique
+IosevkaCustom-Heavy.ttf            Iosevka-Custom-Heavy
+IosevkaCustom-HeavyOblique.ttf     Iosevka-Custom-Heavy-Oblique
+IosevkaCustom-Regular.ttf          Iosevka-Custom
+IosevkaCustom-Oblique.ttf          Iosevka-Custom-Oblique
+IosevkaCustom-SemiBold.ttf         Iosevka-Custom-Semibold
+IosevkaCustom-SemiBoldOblique.ttf  Iosevka-Custom-Semibold-Oblique
 IosevkaCustom-Medium.ttf           Iosevka-Custom-Medium
 IosevkaCustom-Bold.ttf             Iosevka-Custom-Bold
 IosevkaCustom-MediumOblique.ttf    Iosevka-Custom-Medium-Oblique
 IosevkaCustom-BoldOblique.ttf      Iosevka-Custom-Bold-Oblique
 
-Все четыре файла указывают в метаданных версию 34.9.0 и лицензию SIL Open
+Все восемнадцать файлов указывают в метаданных версию 34.9.0 и лицензию SIL Open
 Font License, Version 1.1. Их метаданные copyright содержат:
 Copyright 2015-2026, Renzhi Li (aka. Belleve Invis, belleve@typeof.net).
 

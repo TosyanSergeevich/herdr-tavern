@@ -46,6 +46,8 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     private var window: NSWindow!
     private var surface: SurfaceView!
     private var popupSurface: SurfaceView!
+    private let terminalSettings = TavernTerminalSettings()
+    private var terminalFonts: TerminalFonts!
     private var popupTitle = NSTextField(labelWithString: "")
     private let popupCloseButton = TavernButton()
     private var popupContainer = NSBox()
@@ -150,7 +152,10 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         }
         catch { showStartupError(error.localizedDescription); return }
         let fonts: TerminalFonts
-        do { fonts = try TerminalFonts.load(size: 16) }
+        do {
+            let typography = terminalSettings.typography
+            fonts = try TerminalFonts.load(size: CGFloat(typography.size), weight: typography.weight)
+        }
         catch { showStartupError(error.localizedDescription); return }
         do { try TavernAppearance.validateFonts() }
         catch { showStartupError(error.localizedDescription); return }
@@ -213,9 +218,11 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     private func startInterface(fonts: TerminalFonts) {
         guard !terminated, !interfaceStarted else { return }
         interfaceStarted = true
+        terminalFonts = fonts
         surface = SurfaceView(fonts: fonts)
         popupSurface = SurfaceView(fonts: fonts)
         buildWindow(); buildMenus(); wireSurface(surface)
+        terminalSettings.onChange = { [weak self] in self?.applyTerminalTypography($0) }
         NotificationCenter.default.addObserver(self, selector: #selector(languageDidChange(_:)),
                                                name: .tavernLanguageDidChange, object: nil)
         for name in [NSWindow.willBeginSheetNotification, NSWindow.didEndSheetNotification] {
@@ -246,6 +253,15 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         NSApp.activate(ignoringOtherApps: true)
         connect()
         DispatchQueue.main.async { [weak self] in self?.offerAgentSetup() }
+    }
+    private func applyTerminalTypography(_ typography: TerminalTypography) {
+        let fonts = terminalFonts.configured(size: CGFloat(typography.size), weight: typography.weight)
+        terminalFonts = fonts
+        navigationDrag.cancel()
+        surface.setFonts(fonts)
+        popupSurface.setFonts(fonts)
+        paneGripLayoutKey = nil
+        layoutBody()
     }
     private func showStartupError(_ message: String) {
         let alert = TavernDialog(useBundledAppearance: false); alert.messageText = "Herdr Tavern"; alert.informativeText = message
@@ -403,7 +419,9 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     private func prepareSettings() -> TavernSettingsWindowController {
         if let settingsController { return settingsController }
         let controller = TavernSettingsWindowController(settings: soundSettings, player: soundPlayer,
-                                                        integrations: agentIntegrations)
+                                                        integrations: agentIntegrations,
+                                                        terminalSettings: terminalSettings,
+                                                        terminalFonts: terminalFonts)
         settingsController = controller
         return controller
     }
@@ -891,11 +909,13 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         snapshot = [:]; surface.clear(); popupSurface.clear(); popupContainer.isHidden = true; surface.isHidden = true
         lastGeometry = ""; navigationPresentation = nil; paneGripLayoutKey = nil; resumeRequested = false
         connecting = true; attached = false; clearError(); rebuildNavigation()
-        let cols = surface.cols, rows = surface.rows, scale = window.backingScaleFactor
+        let cols = surface.cols, rows = surface.rows, scale = max(1, window.backingScaleFactor)
+        let cellWidth = Int(surface.cellWidth * scale), cellHeight = Int(surface.cellHeight * scale)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
                 try options.ensureServer()
-                let pointer = try RustConnection.open(path: options.socketPath, cols: cols, rows: rows, cellWidth: Int(8 * scale), cellHeight: Int(20 * scale))
+                let pointer = try RustConnection.open(path: options.socketPath, cols: cols, rows: rows,
+                                                      cellWidth: cellWidth, cellHeight: cellHeight)
                 DispatchQueue.main.async {
                     guard let self, self.generation == epoch, !self.terminated else {
                         DispatchQueue.global().async { tavern_client_close(pointer); tavern_client_free(pointer) }; return

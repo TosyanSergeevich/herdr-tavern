@@ -12,7 +12,7 @@
 
 Herdr is not included in the app bundle. Agent programs and model access are configured separately. Python and an image generator are not needed for a normal build.
 
-All supplied fonts are included in `resources/Fonts/` and copied into the `.app` by the build, without downloading fonts or reading local font installations. Tavern loads them from its resources at startup; no manual font installation is required. The terminal uses Iosevka Custom **34.9.0** (Medium, Bold, Medium Oblique, and Bold Oblique) and Symbols Nerd Font; the decorative interface fonts are bundled too. System Menlo and emoji fallbacks remain provided by macOS.
+All supplied fonts are included in `resources/Fonts/` and copied into the `.app` by the build, without downloading fonts or reading local font installations. Tavern loads them from its resources at startup; no manual font installation is required. The terminal uses Iosevka Custom **34.9.0** (nine weights from Thin to Heavy, with real Oblique faces) and Symbols Nerd Font; the decorative interface fonts are bundled too. System Menlo and emoji fallbacks remain provided by macOS.
 
 ## Local signing
 
@@ -72,6 +72,12 @@ Tavern also sets `PI_FORCE_IMAGE_PROTOCOL=kitty` when starting a server so omp c
 **Language.** Open Settings with `⌘,` or the tools button and choose **English** or **Русский**. English is the initial language; your choice is saved. The interface updates immediately without restarting Tavern, reconnecting, or losing herdr sessions. Terminal output and external programs retain their own languages.
 
 **Agents and sounds.** The Agents section can install, update, and remove herdr integrations; agent programs and model access must be configured separately. Restart the relevant agent after changing its integration. The Sounds section offers toggles, volume, previews, and replacement with your own sound files.
+
+Settings controls use the configured interface-click sound, respecting the master switch, event switch, custom sound, and volume. Sliders share Tavern's bronze-and-gold styling; a drag gives one click on release while its value updates live. Sound previews play only the selected sound, without an extra click.
+
+**Terminal font.** Open **Settings → Terminal** to select a whole-number size from **12 to 24 pt** and one of eight base weights: **Thin, ExtraLight, Light, Regular, Medium, Semibold, Bold, ExtraBold**. A stepped slider shows the selected weight by name and supports arrow keys. The default is **16 pt, Medium**. The preview shows normal, bold, and oblique text. Commit the size with Return or by leaving the field; the stepper and weight slider apply immediately. **Restore defaults** resets both values. Preferences survive restarts and update the main and popup terminal surfaces without reconnecting or restarting pane processes. Program-requested bold uses Bold through Semibold, ExtraBold at a Bold base, and Heavy at an ExtraBold base. Heavy is reserved for emphasis, so bold text remains heavier throughout the selectable range. Interface labels and card fonts do not change.
+
+Font changes refresh glyph/ink/composition metrics and request the matching terminal geometry. Cell dimensions are rounded to backing pixels, including odd point sizes; reconnect uses the currently selected metrics. The loaded font faces remain in memory, so changing preferences does not reread font files.
 
 **Herdr configuration.** The **herdr** menu exposes available settings and can open, validate, and reload the full `config.toml`, shared by local sessions. Herdr themes and indicators do not change Tavern's appearance; Tavern sounds are configured separately. With `--socket`, this menu still edits local configuration, which may differ from the connected server's. See the [herdr configuration documentation](https://herdr.dev/docs/configuration/).
 

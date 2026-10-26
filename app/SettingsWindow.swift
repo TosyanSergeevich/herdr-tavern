@@ -54,19 +54,21 @@ final class TavernSettingsWindowController: NSWindowController {
     private let settings: TavernSoundSettings
     private let player: TavernSoundPlayer
     private let masterEnabled = TavernSoundSwitch()
-    private let masterVolume = NSSlider(value: 0.5, minValue: 0, maxValue: 1, target: nil, action: nil)
+    private let masterVolume = TavernSettingsSlider(frame: .zero)
     private let masterPercentage = NSTextField(labelWithString: "")
     private var eventControls: [TavernSoundEvent: EventControls] = [:]
     private let detailsPopover = NSPopover()
     private var detailControls: DetailControls?
     private var soundMutationBusy = false
-    private enum Section: String { case sounds, agents }
+    private enum Section: String { case sounds, agents, terminal }
     private let defaults: UserDefaults
     private let agentsView: AgentSettingsView
+    private let terminalView: TerminalSettingsView
     private let soundView = NSView()
     private let sectionHost = NSView()
     private let soundsButton = TavernButton(title: L("settings.sounds"), target: nil, action: nil)
     private let agentsButton = TavernButton(title: L("settings.agents"), target: nil, action: nil)
+    private let terminalButton = TavernButton(title: L("settings.terminal"), target: nil, action: nil)
     private var selectedSection: Section
     private static let sectionKey = "tavern.settings.lastSection"
     private let languagePicker = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -75,11 +77,13 @@ final class TavernSettingsWindowController: NSWindowController {
     private var sheetLanguageUpdate: (() -> Void)?
 
     init(settings: TavernSoundSettings, player: TavernSoundPlayer, integrations: AgentIntegrationService,
+         terminalSettings: TavernTerminalSettings, terminalFonts: TerminalFonts,
          defaults: UserDefaults = .standard) {
         self.settings = settings
         self.player = player
         self.defaults = defaults
         agentsView = AgentSettingsView(service: integrations)
+        terminalView = TerminalSettingsView(settings: terminalSettings, fonts: terminalFonts)
         selectedSection = Section(rawValue: defaults.string(forKey: Self.sectionKey) ?? "") ?? .sounds
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 940, height: 640),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -95,6 +99,8 @@ final class TavernSettingsWindowController: NSWindowController {
         window.titlebarAppearsTransparent = true
         window.appearance = NSAppearance(named: .darkAqua)
         super.init(window: window)
+        agentsView.onInteraction = { [weak player] in player?.play(.interfaceClick) }
+        terminalView.onInteraction = { [weak player] in player?.play(.interfaceClick) }
         buildContent(in: window)
         refreshControls()
         languageObserver = NotificationCenter.default.addObserver(forName: .tavernLanguageDidChange, object: nil, queue: nil) { [weak self] _ in
@@ -110,17 +116,21 @@ final class TavernSettingsWindowController: NSWindowController {
 
     @objc private func changeLanguage(_ sender: NSPopUpButton) {
         let languages = TavernLanguage.allCases
-        guard languages.indices.contains(sender.indexOfSelectedItem) else { return }
+        guard sender.isEnabled, languages.indices.contains(sender.indexOfSelectedItem) else { return }
         TavernLocalization.shared.setLanguage(languages[sender.indexOfSelectedItem])
+        player.play(.interfaceClick)
     }
 
     private func languageDidChange() {
         window?.title = L("settings.title")
         soundsButton.title = L("settings.sounds")
         agentsButton.title = L("settings.agents")
-        for button in [soundsButton, agentsButton] { button.setAccessibilityLabel(button.title) }
-        soundsButton.setAccessibilityValue(L(selectedSection == .sounds ? "settings.selected" : "settings.notSelected"))
-        agentsButton.setAccessibilityValue(L(selectedSection == .agents ? "settings.selected" : "settings.notSelected"))
+        terminalButton.title = L("settings.terminal")
+        for (section, button, _) in sections {
+            button.setAccessibilityLabel(button.title)
+            button.setAccessibilityValue(L(selectedSection == section ? "settings.selected" : "settings.notSelected"))
+        }
+        terminalView.refreshLanguage()
         languagePicker.setAccessibilityLabel(L("settings.language"))
         languagePicker.selectItem(at: TavernLanguage.allCases.firstIndex(of: TavernLocalization.shared.language) ?? 0)
         languageUpdates.forEach { $0() }
@@ -132,6 +142,7 @@ final class TavernSettingsWindowController: NSWindowController {
         let wasVisible = window?.isVisible == true
         refreshControls()
         if selectedSection == .agents { agentsView.refresh() }
+        terminalView.refresh()
         super.showWindow(sender)
         window?.makeKeyAndOrderFront(sender)
         if !wasVisible, let content = window?.contentView { TavernMotion.appear(content) }
@@ -142,25 +153,44 @@ final class TavernSettingsWindowController: NSWindowController {
         showWindow(nil)
     }
 
-    @objc private func showSoundsSection(_ sender: NSButton) { selectSection(.sounds) }
+    @objc private func showSoundsSection(_ sender: NSButton) {
+        guard sender.isEnabled else { return }
+        player.play(.interfaceClick)
+        selectSection(.sounds)
+    }
     @objc private func showAgentsSection(_ sender: NSButton) {
+        guard sender.isEnabled else { return }
+        player.play(.interfaceClick)
         selectSection(.agents)
         agentsView.refresh()
+    }
+
+    @objc private func showTerminalSection(_ sender: NSButton) {
+        guard sender.isEnabled else { return }
+        player.play(.interfaceClick)
+        selectSection(.terminal)
+        terminalView.refresh()
+    }
+
+    private var sections: [(Section, TavernButton, NSView)] {
+        [(.sounds, soundsButton, soundView), (.agents, agentsButton, agentsView),
+         (.terminal, terminalButton, terminalView)]
     }
 
     private func selectSection(_ section: Section) {
         detailsPopover.close()
         if selectedSection != section {
-            window?.makeFirstResponder(section == .sounds ? soundsButton : agentsButton)
+            if let button = sections.first(where: { $0.0 == section })?.1 {
+                window?.makeFirstResponder(button)
+            }
         }
         selectedSection = section
         defaults.set(section.rawValue, forKey: Self.sectionKey)
-        soundView.isHidden = section != .sounds
-        agentsView.isHidden = section != .agents
-        soundsButton.prepare(style: .utility, selected: section == .sounds)
-        agentsButton.prepare(style: .utility, selected: section == .agents)
-        soundsButton.setAccessibilityValue(L(section == .sounds ? "settings.selected" : "settings.notSelected"))
-        agentsButton.setAccessibilityValue(L(section == .agents ? "settings.selected" : "settings.notSelected"))
+        for (candidate, button, view) in sections {
+            view.isHidden = section != candidate
+            button.prepare(style: .utility, selected: section == candidate)
+            button.setAccessibilityValue(L(section == candidate ? "settings.selected" : "settings.notSelected"))
+        }
     }
     private func buildContent(in window: NSWindow) {
         let root = ChromeView(fill: TavernAppearance.wood, material: .wood)
@@ -185,7 +215,8 @@ final class TavernSettingsWindowController: NSWindowController {
         sidebar.addSubview(navigation)
         for (button, section, action) in [
             (soundsButton, Section.sounds, #selector(showSoundsSection(_:))),
-            (agentsButton, Section.agents, #selector(showAgentsSection(_:)))
+            (agentsButton, Section.agents, #selector(showAgentsSection(_:))),
+            (terminalButton, Section.terminal, #selector(showTerminalSection(_:)))
         ] {
             button.target = self
             button.action = action
@@ -209,7 +240,7 @@ final class TavernSettingsWindowController: NSWindowController {
             navigation.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -10),
             navigation.topAnchor.constraint(equalTo: sidebar.topAnchor, constant: 18)
         ])
-        for view in [soundView, agentsView] {
+        for (_, _, view) in sections {
             view.translatesAutoresizingMaskIntoConstraints = false
             sectionHost.addSubview(view)
             NSLayoutConstraint.activate([
@@ -349,7 +380,9 @@ final class TavernSettingsWindowController: NSWindowController {
         title.maximumNumberOfLines = 2
         title.widthAnchor.constraint(greaterThanOrEqualToConstant: 124).isActive = true
 
-        let volume = NSSlider(value: 0, minValue: 0, maxValue: 1, target: self, action: #selector(changeEventVolume(_:)))
+        let volume = TavernSettingsSlider(frame: .zero)
+        volume.target = self
+        volume.action = #selector(changeEventVolume(_:))
         volume.tag = index
         prepareSlider(volume, label: L("settings.sound.eventVolume", event.title), identifier: "\(prefix).volume")
         if event == .attention {
@@ -375,7 +408,8 @@ final class TavernSettingsWindowController: NSWindowController {
     }
 
     @objc private func showDetails(_ sender: NSButton) {
-        guard let event = event(for: sender) else { return }
+        guard sender.isEnabled, let event = event(for: sender) else { return }
+        player.play(.interfaceClick)
         if detailsPopover.isShown, detailControls?.event == event {
             detailsPopover.performClose(sender)
             return
@@ -478,7 +512,10 @@ final class TavernSettingsWindowController: NSWindowController {
         return field
     }
 
-    private func prepareSlider(_ slider: NSSlider, label: String, identifier: String) {
+    private func prepareSlider(_ slider: TavernSettingsSlider, label: String, identifier: String) {
+        slider.minValue = 0
+        slider.maxValue = 1
+        slider.onInteraction = { [weak player] in player?.play(.interfaceClick) }
         slider.isContinuous = true
         slider.trackFillColor = TavernAppearance.accent
         slider.setAccessibilityLabel(label)
@@ -554,8 +591,10 @@ final class TavernSettingsWindowController: NSWindowController {
     }
 
     @objc private func changeMasterEnabled(_ sender: NSButton) {
+        guard sender.isEnabled else { return }
         settings.enabled = sender.state == .on
         refreshControls()
+        player.play(.interfaceClick)
     }
 
     @objc private func changeMasterVolume(_ sender: NSSlider) {
@@ -564,9 +603,10 @@ final class TavernSettingsWindowController: NSWindowController {
     }
 
     @objc private func changeEventEnabled(_ sender: NSButton) {
-        guard let event = event(for: sender) else { return }
+        guard sender.isEnabled, let event = event(for: sender) else { return }
         settings.setEnabled(sender.state == .on, for: event)
         refreshControls()
+        player.play(.interfaceClick)
     }
 
     @objc private func changeEventVolume(_ sender: NSSlider) {
@@ -576,13 +616,14 @@ final class TavernSettingsWindowController: NSWindowController {
     }
 
     @objc private func previewSound(_ sender: NSButton) {
-        guard settings.enabled, let event = event(for: sender) else { return }
+        guard sender.isEnabled, settings.enabled, let event = event(for: sender) else { return }
         // Владелец player.onError в main показывает ошибки воспроизведения.
         player.play(event, preview: true)
     }
 
     @objc private func chooseSound(_ sender: NSButton) {
-        guard !soundMutationBusy, let event = event(for: sender), let window else { return }
+        guard sender.isEnabled, !soundMutationBusy, let event = event(for: sender), let window else { return }
+        player.play(.interfaceClick)
         soundMutationBusy = true
         refreshDetails()
         detailsPopover.close()
@@ -619,7 +660,8 @@ final class TavernSettingsWindowController: NSWindowController {
     }
 
     @objc private func resetSound(_ sender: NSButton) {
-        guard !soundMutationBusy, let event = event(for: sender) else { return }
+        guard sender.isEnabled, !soundMutationBusy, let event = event(for: sender) else { return }
+        player.play(.interfaceClick)
         soundMutationBusy = true
         refreshDetails()
         settings.resetSound(for: event) { [weak self] result in

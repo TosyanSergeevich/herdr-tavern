@@ -18,6 +18,7 @@ https://github.com/user-attachments/assets/850a079e-4e12-4842-a6ab-5b34cc973784
 - Drag individual or grouped tabs without restarting their processes.
 - Agent cards with status, animated talismans, input requests, and unread reply indicators.
 - Agent integration management, configurable sounds, and macOS notifications.
+- Adjustable terminal font size and weight, with live preview and saved preferences.
 - English and Russian UI, switchable without restarting. Support for the system Reduce Motion setting.
 
 Closing the window leaves the herdr session running. Closing a pane or tab stops its processes and requires confirmation. Agent programs and model access are configured separately.

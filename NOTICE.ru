@@ -63,7 +63,21 @@ IOSEVKA CUSTOM
 
 Iosevka Custom, версия 34.9.0.
 Copyright 2015-2026, Renzhi Li (aka. Belleve Invis, belleve@typeof.net).
-В комплект без изменений включены четыре файла шрифта:
+В комплект без изменений включены восемнадцать файлов шрифта:
+resources/Fonts/IosevkaCustom-Thin.ttf
+resources/Fonts/IosevkaCustom-ThinOblique.ttf
+resources/Fonts/IosevkaCustom-ExtraLight.ttf
+resources/Fonts/IosevkaCustom-ExtraLightOblique.ttf
+resources/Fonts/IosevkaCustom-Light.ttf
+resources/Fonts/IosevkaCustom-LightOblique.ttf
+resources/Fonts/IosevkaCustom-ExtraBold.ttf
+resources/Fonts/IosevkaCustom-ExtraBoldOblique.ttf
+resources/Fonts/IosevkaCustom-Heavy.ttf
+resources/Fonts/IosevkaCustom-HeavyOblique.ttf
+resources/Fonts/IosevkaCustom-Regular.ttf
+resources/Fonts/IosevkaCustom-Oblique.ttf
+resources/Fonts/IosevkaCustom-SemiBold.ttf
+resources/Fonts/IosevkaCustom-SemiBoldOblique.ttf
 resources/Fonts/IosevkaCustom-Medium.ttf
 resources/Fonts/IosevkaCustom-Bold.ttf
 resources/Fonts/IosevkaCustom-MediumOblique.ttf

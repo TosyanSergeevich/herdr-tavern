@@ -7,9 +7,7 @@ import AppKit
 @main struct SurfaceLinkTests {
     static func main() throws {
         _ = NSApplication.shared
-        let font = NSFont.monospacedSystemFont(ofSize: 16, weight: .regular)
-        let surface = SurfaceView(fonts: TerminalFonts(regular: font, bold: font, italic: font,
-                                                      boldItalic: font, symbols: font))
+        let surface = SurfaceView(fonts: try TerminalFonts.load(size: 16))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 40), styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = surface
         var hoverLocation: NSPoint?

@@ -193,9 +193,7 @@ import AppKit
             }
             if !items.isEmpty { board.writeObjects(items) }
         }
-        let font = NSFont.monospacedSystemFont(ofSize:16,weight:.regular)
-        surface = SurfaceView(fonts: TerminalFonts(regular: font, bold: font, italic: font,
-                                                 boldItalic: font, symbols: font))
+        surface = SurfaceView(fonts: try TerminalFonts.load(size: 16))
         window = NSWindow(contentRect:NSRect(x:0,y:0,width:width*8,height:height*20),styleMask:[.titled],backing:.buffered,defer:false)
         window.contentView = surface
         try apply()

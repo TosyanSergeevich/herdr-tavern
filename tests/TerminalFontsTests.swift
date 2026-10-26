@@ -30,6 +30,76 @@ import CoreText
         print("PASS: bundled faces preserve the selected typeface and monospace Latin/Cyrillic metrics")
     }
 
+    private static func validateConfigurations(_ fonts: TerminalFonts) {
+        let names: [(TerminalFontWeight, String, String, String)] = [
+            (.thin, "Iosevka-Custom-Thin", "Iosevka-Custom-Thin-Oblique", "Iosevka-Custom-Bold"),
+            (.extraLight, "Iosevka-Custom-Extralight", "Iosevka-Custom-Extralight-Oblique", "Iosevka-Custom-Bold"),
+            (.light, "Iosevka-Custom-Light", "Iosevka-Custom-Light-Oblique", "Iosevka-Custom-Bold"),
+            (.regular, "Iosevka-Custom", "Iosevka-Custom-Oblique", "Iosevka-Custom-Bold"),
+            (.medium, "Iosevka-Custom-Medium", "Iosevka-Custom-Medium-Oblique", "Iosevka-Custom-Bold"),
+            (.semibold, "Iosevka-Custom-Semibold", "Iosevka-Custom-Semibold-Oblique", "Iosevka-Custom-Bold"),
+            (.bold, "Iosevka-Custom-Bold", "Iosevka-Custom-Bold-Oblique", "Iosevka-Custom-Extrabold"),
+            (.extraBold, "Iosevka-Custom-Extrabold", "Iosevka-Custom-Extrabold-Oblique", "Iosevka-Custom-Heavy"),
+        ]
+        let characters = Array("0MWЖ".utf16)
+        for size in [12, 13, 16, 24] {
+            for (weight, normalName, obliqueName, strongName) in names {
+                let selected = fonts.configured(size: CGFloat(size), weight: weight)
+                precondition(selected.regular.fontName == normalName, "\(weight) at \(size) pt")
+                precondition(selected.italic.fontName == obliqueName, "\(weight) must use true Oblique")
+                precondition(selected.bold.fontName == strongName)
+                precondition(selected.boldItalic.fontName == strongName + "-Oblique")
+                let normalWeight = (CTFontCopyTraits(selected.regular as CTFont) as NSDictionary)[kCTFontWeightTrait] as! NSNumber
+                let strongWeight = (CTFontCopyTraits(selected.bold as CTFont) as NSDictionary)[kCTFontWeightTrait] as! NSNumber
+                precondition(strongWeight.doubleValue > normalWeight.doubleValue,
+                             "ANSI bold must be heavier at every selectable base weight")
+                precondition(selected.regular.fontName != selected.bold.fontName,
+                             "ANSI bold must remain distinct from \(weight)")
+                precondition(selected.symbols.pointSize == CGFloat(size))
+                for font in [selected.regular, selected.bold, selected.italic, selected.boldItalic] {
+                    precondition(font.pointSize == CGFloat(size))
+                    var glyphs = [CGGlyph](repeating: 0, count: characters.count)
+                    precondition(CTFontGetGlyphsForCharacters(font as CTFont, characters, &glyphs, characters.count))
+                    var advances = [CGSize](repeating: .zero, count: glyphs.count)
+                    CTFontGetAdvancesForGlyphs(font as CTFont, .horizontal, glyphs, &advances, glyphs.count)
+                    for advance in advances {
+                        precondition(abs(advance.width - CGFloat(size) / 2) < 0.001,
+                                     "\(font.fontName) at \(size) must preserve Latin/Cyrillic monospace metrics")
+                    }
+                }
+                for scale in [CGFloat(1), CGFloat(2)] {
+                    let cell = selected.cellSize(backingScale: scale)
+                    precondition(cell.width == ceil(CGFloat(size) / 2 * scale) / scale)
+                    precondition(cell.height * scale == ceil(cell.height * scale))
+                    if size == 16 {
+                        precondition(cell == NSSize(width: 8, height: 20),
+                                     "Default metrics must remain 8×20 points at both backing scales")
+                    }
+                }
+            }
+        }
+        print("PASS: all weights/sizes preserve real Oblique, distinct ANSI bold and pixel-aligned monospace metrics")
+    }
+
+    private static func configurationsWithoutResources(in source: Bundle) throws {
+        let (root, bundle) = try fixture(from: source)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fonts = try TerminalFonts.load(size: 16, bundle: bundle)
+        try FileManager.default.removeItem(at: bundle.resourceURL!.appendingPathComponent("Fonts"))
+        validateConfigurations(fonts)
+        validateConfigurations(fonts.configured(size: 24, weight: .semibold))
+        print("PASS: repeated size/weight changes retain all original faces after resource removal")
+    }
+
+    private static func missingSemibold(in source: Bundle) throws {
+        let (root, bundle) = try fixture(from: source)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.removeItem(at: bundle.resourceURL!
+            .appendingPathComponent("Fonts/IosevkaCustom-SemiBold.ttf"))
+        expectResourceError(in: bundle)
+        print("PASS: loading validates optional-weight resources before the first settings change")
+    }
+
     private static func fixture(from source: Bundle) throws -> (URL, Bundle) {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("TerminalFonts-" + UUID().uuidString + ".app")
@@ -76,8 +146,10 @@ import CoreText
             preconditionFailure("Pass the built .app bundle as the first argument")
         }
         try validateFaces(in: bundle)
+        try configurationsWithoutResources(in: bundle)
+        try missingSemibold(in: bundle)
         try missingBold(in: bundle)
         try damagedRegular(in: bundle)
-        print("Passed 3 bundled-font scenarios")
+        print("Passed 5 bundled-font scenarios")
     }
 }

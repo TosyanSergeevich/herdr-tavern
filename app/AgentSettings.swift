@@ -155,11 +155,18 @@ private final class AgentIntegrationRow: NSView {
         if busy { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
     }
 
-    @objc private func install(_ sender: NSButton) { onInstall?() }
-    @objc private func showMenu(_ sender: NSButton) { onMenu?(sender) }
+    @objc private func install(_ sender: NSButton) {
+        guard sender.isEnabled else { return }
+        onInstall?()
+    }
+    @objc private func showMenu(_ sender: NSButton) {
+        guard sender.isEnabled else { return }
+        onMenu?(sender)
+    }
 }
 
 final class AgentSettingsView: NSView {
+    var onInteraction: (() -> Void)?
     private let service: AgentIntegrationService
     private let refreshButton: TavernButton
     private let disclosure = NSButton(title: L("settings.integration.otherAgents"), target: nil, action: nil)
@@ -381,9 +388,15 @@ final class AgentSettingsView: NSView {
         }
     }
 
-    @objc private func refreshPressed(_ sender: NSButton) { refresh() }
+    @objc private func refreshPressed(_ sender: NSButton) {
+        guard sender.isEnabled, !isRefreshing, busyTarget == nil else { return }
+        onInteraction?()
+        refresh()
+    }
 
     @objc private func toggleOthers(_ sender: NSButton) {
+        guard sender.isEnabled else { return }
+        onInteraction?()
         expanded = sender.state == .on
         otherRows.isHidden = !expanded
         sender.image = NSImage(systemSymbolName: expanded ? "chevron.down" : "chevron.right", accessibilityDescription: nil)
@@ -394,6 +407,7 @@ final class AgentSettingsView: NSView {
         guard !isRefreshing, busyTarget == nil, hasFreshStatus,
               let agent = agents.first(where: { $0.target == target }), agent.available,
               agent.state == "notInstalled" || agent.needsUpdate else { return }
+        onInteraction?()
         run(target: target, success: "settings.integration.installedNotice") { completion in
             service.install(target: target, completion: completion)
         }
@@ -420,7 +434,9 @@ final class AgentSettingsView: NSView {
     }
 
     private func showMenu(target: String, sender: NSButton) {
-        guard !isRefreshing, busyTarget == nil, let agent = agents.first(where: { $0.target == target }) else { return }
+        guard sender.isEnabled, !isRefreshing, busyTarget == nil, hasFreshStatus,
+              let agent = agents.first(where: { $0.target == target }) else { return }
+        onInteraction?()
         let menu = NSMenu()
         menu.autoenablesItems = false
         func item(_ title: String, _ action: Selector, enabled: Bool = true) {
@@ -449,18 +465,21 @@ final class AgentSettingsView: NSView {
     }
 
     private func agent(for item: NSMenuItem) -> AgentIntegration? {
-        guard !isRefreshing, busyTarget == nil, let target = item.representedObject as? String else { return nil }
+        guard item.isEnabled, !isRefreshing, busyTarget == nil, hasFreshStatus,
+              let target = item.representedObject as? String else { return nil }
         return agents.first(where: { $0.target == target })
     }
 
     @objc private func openInstructions(_ sender: NSMenuItem) {
         guard agent(for: sender) != nil,
               let url = URL(string: "https://herdr.dev/docs/agents/") else { return }
+        onInteraction?()
         NSWorkspace.shared.open(url)
     }
 
     @objc private func showDetails(_ sender: NSMenuItem) {
         guard let agent = agent(for: sender), let window else { return }
+        onInteraction?()
         let alert = TavernDialog()
         alert.messageText = agent.label
         alert.informativeText = L("settings.integration.detailsNote")
@@ -502,6 +521,7 @@ final class AgentSettingsView: NSView {
 
     @objc private func chooseExecutable(_ sender: NSMenuItem) {
         guard let agent = agent(for: sender), let window else { return }
+        onInteraction?()
         let panel = NSOpenPanel()
         panel.title = L("settings.integration.executableTitle", agent.label)
         panel.message = L("settings.integration.executableMessage", agent.command)
@@ -527,6 +547,7 @@ final class AgentSettingsView: NSView {
 
     @objc private func chooseProfile(_ sender: NSMenuItem) {
         guard let agent = agent(for: sender), agent.supportsProfileDirectory, let window else { return }
+        onInteraction?()
         let panel = NSOpenPanel()
         panel.title = L("settings.integration.profileTitle", agent.label)
         panel.message = agent.profileDirectoryHint + " " + L("settings.integration.profileMessage")
@@ -553,6 +574,7 @@ final class AgentSettingsView: NSView {
 
     @objc private func resetProfile(_ sender: NSMenuItem) {
         guard let agent = agent(for: sender) else { return }
+        onInteraction?()
         service.setProfileDirectory(nil, for: agent.target)
         notices[agent.target] = AgentSettingsNotice(text: { L("settings.integration.defaultProfileSaved") }, isError: false)
         refresh()
@@ -560,6 +582,7 @@ final class AgentSettingsView: NSView {
 
     @objc private func resetExecutable(_ sender: NSMenuItem) {
         guard let agent = agent(for: sender) else { return }
+        onInteraction?()
         service.setExecutablePath(nil, for: agent.target)
         notices[agent.target] = AgentSettingsNotice(text: { L("settings.integration.automaticCommandSaved") }, isError: false)
         refresh()
@@ -567,6 +590,7 @@ final class AgentSettingsView: NSView {
 
     @objc private func removeIntegration(_ sender: NSMenuItem) {
         guard let agent = agent(for: sender), agent.installed, let window else { return }
+        onInteraction?()
         let alert = TavernDialog()
         alert.alertStyle = .warning
         alert.messageText = L("settings.integration.removeTitle", agent.label)
@@ -590,6 +614,7 @@ final class AgentSettingsView: NSView {
         }
         alert.beginSheetModal(for: window) { [weak self] response in
             guard let self, response == .alertFirstButtonReturn, !self.isRefreshing, self.busyTarget == nil else { return }
+            self.onInteraction?()
             self.run(target: agent.target, success: "settings.integration.removedNotice") { completion in
                 self.service.uninstall(target: agent.target, completion: completion)
             }

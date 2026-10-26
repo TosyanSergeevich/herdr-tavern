@@ -48,10 +48,8 @@ private final class HoverFileGate {
         init(root: URL, name: String) throws {
             text = name
             cwd = root.path
-            let font = NSFont.monospacedSystemFont(ofSize: 16, weight: .regular)
             let resolver = TerminalLinkHoverResolver(fileExists: gate.exists)
-            surface = SurfaceView(fonts: TerminalFonts(regular: font, bold: font, italic: font,
-                boldItalic: font, symbols: font), hoverResolver: resolver)
+            surface = SurfaceView(fonts: try TerminalFonts.load(size: 16), hoverResolver: resolver)
             window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 640, height: 60),
                               styleMask: .borderless, backing: .buffered, defer: false)
             window.isReleasedWhenClosed = false

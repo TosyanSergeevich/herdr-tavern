@@ -23,17 +23,18 @@ struct GraphicAsset { let id: String; let width: Int; let height: Int; let forma
 
 
 final class SurfaceView: NSView, NSTextInputClient {
-    let gridFont: NSFont
-    let boldFont: NSFont
-    let italicFont: NSFont
-    let boldItalicFont: NSFont
-    private let emDashFonts: [NSFont]
-    private let symbolsFont: NSFont
-    private let symbolsCharacterSet: CFCharacterSet
-    private let primaryCharacterSets: [CFCharacterSet]
-    let cellWidth: CGFloat = 8
-    let cellHeight: CGFloat = 20
-    let ascent: CGFloat
+    private(set) var gridFont: NSFont
+    private(set) var boldFont: NSFont
+    private(set) var italicFont: NSFont
+    private(set) var boldItalicFont: NSFont
+    private var emDashFonts: [NSFont]
+    private var symbolsFont: NSFont
+    private var symbolsCharacterSet: CFCharacterSet
+    private var primaryCharacterSets: [CFCharacterSet]
+    private var configuredFonts: TerminalFonts
+    private(set) var cellWidth: CGFloat
+    private(set) var cellHeight: CGFloat
+    private(set) var ascent: CGFloat
     var cols = 1
     var rows = 1
     var width = 0
@@ -112,6 +113,10 @@ final class SurfaceView: NSView, NSTextInputClient {
 
     init(fonts: TerminalFonts, hoverResolver: TerminalLinkHoverResolver = TerminalLinkHoverResolver()) {
         self.hoverResolver = hoverResolver
+        configuredFonts = fonts
+        let cellSize = fonts.cellSize(backingScale: 1)
+        cellWidth = cellSize.width
+        cellHeight = cellSize.height
         let font = fonts.regular
         gridFont = font
         boldFont = fonts.bold
@@ -120,13 +125,7 @@ final class SurfaceView: NSView, NSTextInputClient {
         symbolsFont = fonts.symbols
         symbolsCharacterSet = CTFontCopyCharacterSet(fonts.symbols as CTFont)
         primaryCharacterSets = [font, boldFont, italicFont, boldItalicFont].map { CTFontCopyCharacterSet($0 as CTFont) }
-        let menlo = NSFont(name: "Menlo", size: font.pointSize)!
-        let menloBold = NSFontManager.shared.convert(menlo, toHaveTrait: .boldFontMask)
-        emDashFonts = [
-            menlo, menloBold,
-            NSFontManager.shared.convert(menlo, toHaveTrait: .italicFontMask),
-            NSFontManager.shared.convert(menloBold, toHaveTrait: .italicFontMask)
-        ]
+        emDashFonts = Self.dashFonts(size: font.pointSize)
         ascent = CTFontGetAscent(font as CTFont)
         super.init(frame: .zero)
         registerForDraggedTypes([.fileURL])
@@ -138,6 +137,38 @@ final class SurfaceView: NSView, NSTextInputClient {
         ) { [weak self] _ in self?.updateLocalizedAccessibility() }
     }
     required init?(coder: NSCoder) { fatalError("SurfaceView requires the configured font") }
+    private static func dashFonts(size: CGFloat) -> [NSFont] {
+        let regular = NSFont(name: "Menlo", size: size)!
+        let bold = NSFontManager.shared.convert(regular, toHaveTrait: .boldFontMask)
+        return [regular, bold,
+                NSFontManager.shared.convert(regular, toHaveTrait: .italicFontMask),
+                NSFontManager.shared.convert(bold, toHaveTrait: .italicFontMask)]
+    }
+    func setFonts(_ fonts: TerminalFonts) {
+        guard gridFont != fonts.regular || boldFont != fonts.bold ||
+              italicFont != fonts.italic || boldItalicFont != fonts.boldItalic ||
+              symbolsFont != fonts.symbols else { return }
+        cancelLinkHover()
+        configuredFonts = fonts
+        gridFont = fonts.regular
+        boldFont = fonts.bold
+        italicFont = fonts.italic
+        boldItalicFont = fonts.boldItalic
+        symbolsFont = fonts.symbols
+        symbolsCharacterSet = CTFontCopyCharacterSet(fonts.symbols as CTFont)
+        primaryCharacterSets = [gridFont, boldFont, italicFont, boldItalicFont].map {
+            CTFontCopyCharacterSet($0 as CTFont)
+        }
+        emDashFonts = Self.dashFonts(size: gridFont.pointSize)
+        ascent = CTFontGetAscent(gridFont as CTFont)
+        glyphs.removeAll(keepingCapacity: true)
+        markedMetrics = nil
+        selectionVersion &+= 1
+        selecting = false; selectionPointer = nil
+        dragSplit = nil; lastSplitRatio = nil
+        geometryBounds = nil; geometryScale = nil
+        updateGeometry()
+    }
     deinit {
         hoverTimer?.invalidate()
         for observer in hoverWindowObservers { NotificationCenter.default.removeObserver(observer) }
@@ -188,6 +219,14 @@ final class SurfaceView: NSView, NSTextInputClient {
     func updateGeometry() {
         let scale = max(1, window?.backingScaleFactor ?? 1)
         guard geometryBounds != bounds || geometryScale != scale else { return }
+        if geometryScale != scale {
+            let cellSize = configuredFonts.cellSize(backingScale: scale)
+            if cellWidth != cellSize.width || cellHeight != cellSize.height {
+                cancelLinkHover()
+                glyphs.removeAll(keepingCapacity: true)
+            }
+            cellWidth = cellSize.width; cellHeight = cellSize.height
+        }
         geometryBounds = bounds; geometryScale = scale
         cols = max(1, min(65535, Int(bounds.width / cellWidth)))
         rows = max(1, min(65535, Int(bounds.height / cellHeight)))
@@ -430,7 +469,7 @@ final class SurfaceView: NSView, NSTextInputClient {
         let ink = reliableInk(of: line).map { $0.applying(matrix).insetBy(dx: attributes[.strokeWidth] == nil ? 0 : -font.pointSize * 0.01,
                                                                        dy: attributes[.strokeWidth] == nil ? 0 : -font.pointSize * 0.01) }
         let glyph = Glyph(line: line, matrix: matrix, ink: ink)
-        // Шрифт фиксирован на время жизни поверхности; цвет задаётся при рисовании.
+        // При смене шрифта кэш очищается; цвет задаётся при рисовании.
         // Ограничение не позволяет истории с уникальными символами разрастить кэш.
         if glyphs.count >= 4096 { glyphs.removeAll(keepingCapacity: true) }
         glyphs[key] = glyph

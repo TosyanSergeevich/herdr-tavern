@@ -22,9 +22,7 @@ private final class FileDrag: NSObject, NSDraggingInfo {
 @main struct FileDropTests {
     static func main() throws {
         _ = NSApplication.shared
-        let font = NSFont.monospacedSystemFont(ofSize: 16, weight: .regular)
-        let surface = SurfaceView(fonts: TerminalFonts(regular: font, bold: font, italic: font,
-                                                      boldItalic: font, symbols: font))
+        let surface = SurfaceView(fonts: try TerminalFonts.load(size: 16))
         surface.frame = NSRect(x: 0, y: 0, width: 320, height: 100)
         surface.scene = ["panes": [
             ["pane_id": "left", "focused": true, "inner_rect": ["x": 0, "y": 0, "width": 20, "height": 5]],
