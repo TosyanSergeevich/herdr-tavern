@@ -85,7 +85,7 @@ struct TavernCardPlacement {
 }
 
 /// Непрозрачная проекция сохраняет штатный parent карточек при живом rebuild.
-/// Оригиналы полностью скрыты на всё время захвата, ответа сервера и пружины.
+/// Оригиналы скрываются лишь после готовности всей группы, до ответа и пружины.
 private final class TavernLiftView: NSView {
     var images: [NSImage] = []
     var cardFrames: [NSRect] = []
@@ -276,6 +276,18 @@ private final class TavernDragOverlay: NSView {
     }
 }
 
+private final class TavernDragCaptureSession {
+    var point: NSPoint
+    var releasePoint: NSPoint?
+    var thresholdCrossed = false
+    var bundled = false
+    var inFlight = false
+    var latest = false
+    var performed = false
+    var offset = NSPoint.zero
+    init(point: NSPoint) { self.point = point }
+}
+
 /// Захват реализован внутри окна: системный drag image способен выйти за контейнер.
 final class TavernNavigationDrag {
     private var overlay: TavernDragOverlay?
@@ -288,6 +300,27 @@ final class TavernNavigationDrag {
     private var suppressed: [ObjectIdentifier: (view: NSView, hidden: Bool)] = [:]
     private var cancelled = false
     private(set) var tracking = false
+    private var captureGeneration: UInt64 = 0
+    private var lifecycle: Timer?
+    private struct CaptureKey: Hashable {
+        let identity: ObjectIdentifier
+        let revision: UInt64
+    }
+    private var imageCache: [CaptureKey: NSImage] = [:]
+    #if TAVERN_RENDER_TESTING
+    var requestImageForTesting: ((NSView, @escaping (Result<NSImage, Error>) -> Void) -> Void)?
+    var nextEventForTesting: (() -> NSEvent?)?
+    var windowAvailableForTesting: (() -> Bool)?
+    var displayedCardsForTesting: [NSButton] { overlay?.lift.images.isEmpty == false ? overlay?.cards ?? [] : [] }
+    var displayedImagesForTesting: [NSImage] { overlay?.lift.images ?? [] }
+    #endif
+
+    private func windowAvailable(_ window: NSWindow) -> Bool {
+        #if TAVERN_RENDER_TESTING
+        if let windowAvailableForTesting { return windowAvailableForTesting() }
+        #endif
+        return window.isVisible && window.isKeyWindow
+    }
 
     func refresh() {
         guard sessionValid?() != false else { cancel(); return }
@@ -298,7 +331,7 @@ final class TavernNavigationDrag {
     private func conceal(_ views: [NSView]) {
         let ids = Set(views.map { ObjectIdentifier($0) })
         for id in Array(suppressed.keys) where !ids.contains(id) {
-            if let saved = suppressed.removeValue(forKey: id), saved.view.superview != nil {
+            if let saved = suppressed.removeValue(forKey: id) {
                 saved.view.isHidden = saved.hidden
             }
         }
@@ -310,6 +343,9 @@ final class TavernNavigationDrag {
     }
 
     private func finish() {
+        captureGeneration &+= 1
+        lifecycle?.invalidate(); lifecycle = nil
+        imageCache.removeAll()
         animation?.invalidate(); animation = nil
         if let escapeMonitor { NSEvent.removeMonitor(escapeMonitor) }
         escapeMonitor = nil; sessionValid = nil
@@ -324,16 +360,21 @@ final class TavernNavigationDrag {
         finish()
     }
 
-    private func image(of view: NSView) -> NSImage? {
+    private func requestImage(of view: NSView, completion: @escaping (Result<NSImage, Error>) -> Void) {
+        #if TAVERN_RENDER_TESTING
+        if let requestImageForTesting { requestImageForTesting(view, completion); return }
+        #endif
         let hidden = view.isHidden
         view.isHidden = false
         defer { view.isHidden = hidden }
-        if let card = view as? TavernButton { return card.dragImage() }
-        guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return nil }
+        if let card = view as? TavernButton { card.requestDragImage(completion: completion); return }
+        guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+            completion(.failure(NSError(domain: "TavernNavigationDrag", code: 1))); return
+        }
         view.cacheDisplay(in: view.bounds, to: bitmap)
         let image = NSImage(size: view.bounds.size)
         image.addRepresentation(bitmap)
-        return image
+        completion(.success(image))
     }
 
     @discardableResult
@@ -347,155 +388,208 @@ final class TavernNavigationDrag {
                autoscroll: (NSPoint) -> Void,
                perform: @escaping (TavernDropTarget, @escaping (Bool) -> Void) -> Void) -> Bool {
         guard let window = button.window, !tracking else { return false }
-        // Новый захват отменяет ещё не завершённую пружину/ожидание старого.
         finish()
         cancelled = false; tracking = true
         defer { tracking = false }
+        let generation = captureGeneration
         let start = root.convert(event.locationInWindow, from: nil)
         let sourceRect = button.convert(button.bounds, to: root)
         let sourceID = button.accessibilityIdentifier()
-        var point = start, lifted: TavernDragOverlay?, selection: TavernDropProposal?
-        var offset = NSPoint.zero, bundled = false
+        let state = TavernDragCaptureSession(point: start)
+        let layer = TavernDragOverlay(frame: root.bounds)
+        layer.autoresizingMask = [.width, .height]
         var lastScroll = ProcessInfo.processInfo.systemUptime
         var cursorPushed = false
         defer { if cursorPushed { NSCursor.pop() } }
-        while valid(), !cancelled, window.isVisible, window.isKeyWindow {
-            var released = false
-            let next = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp, .keyDown],
-                                        until: Date(timeIntervalSinceNow: 1.0 / 60.0), inMode: .eventTracking, dequeue: true)
-            if let next {
-                if next.type == .keyDown {
-                    if next.keyCode == 53 { cancelled = true; break }
-                    continue
-                }
-                point = root.convert(next.locationInWindow, from: nil)
-                if next.type == .leftMouseUp {
-                    if lifted == nil {
-                        if button.convert(button.bounds, to: root).contains(point) { button.performClick(nil) }
-                        return true
-                    }
-                    released = true
-                }
-            }
-            if lifted == nil, hypot(point.x - start.x, point.y - start.y) >= 6 {
-                let layer = TavernDragOverlay(frame: root.bounds)
-                layer.autoresizingMask = [.width, .height]
-                selection = proposal(point)
-                bundled = bundleAt?(point, selection) ?? false
-                refreshVisual = { [weak self, weak layer] in
-                    guard let self, let layer else { return }
-                    let available = members?() ?? [button]
-                    let selected = available.first { $0.accessibilityIdentifier() == sourceID } ?? button
-                    // Выбранная карточка всегда лежит сверху, даже при захвате середины группы.
-                    let cards = bundled ? [selected] + available.filter { $0 !== selected } : [selected]
-                    let images = visual.map { $0().map { [$0] } ?? [] } ?? cards.compactMap { self.image(of: $0) }
-                    guard images.count == (visual == nil ? cards.count : 1), !images.isEmpty else {
-                        self.cancel(); return
-                    }
-                    let oldFrames = layer.renderedCardFrames()
-                    let oldCards = layer.cards
-                    let wasBundled = layer.lift.bundled
-                    if !layer.returning {
-                        layer.lift.configure(images: images, bundled: bundled)
-                        if layer.lift.frame.width > 0, layer.lift.frame.height > 0 {
-                            let natural = layer.lift.naturalSize
-                            let scale = min(layer.lift.frame.width / natural.width, layer.lift.frame.height / natural.height)
-                            layer.lift.frame = TavernDragGeometry.fitted(NSRect(origin: layer.lift.frame.origin,
-                                size: NSSize(width: natural.width * scale, height: natural.height * scale)), inside: limits())
-                        }
-                        if layer.lift.bundled && !wasBundled {
-                            let frames = cards.map { card -> NSRect in
-                                if let index = oldCards.firstIndex(where: { $0 === card }), index < oldFrames.count {
-                                    return oldFrames[index]
-                                }
-                                return TavernDragGeometry.fitted(card.convert(card.bounds, to: root), inside: limits())
-                            }
-                            layer.gather(from: frames)
-                            self.startGatherClock(layer, limits: limits)
-                        } else if !layer.lift.bundled {
-                            layer.stopFlight()
-                        } else if !layer.flight.images.isEmpty {
-                            layer.flight.images = images
-                        }
-                    }
-                    layer.cards = cards
-                    self.conceal(cards.map { $0 as NSView } + (connections?(cards) ?? []))
-                }
-                overlay = layer; lifted = layer
-                sessionValid = valid
-                escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] key in
-                    guard key.keyCode == 53, self?.overlay != nil else { return key }
-                    if self?.tracking == false { self?.returnVisual?() }
-                    else { self?.cancelled = true }
-                    return nil
-                }
-                refresh()
-                returnVisual = { [weak self, weak layer] in
-                    guard let self, let layer, self.overlay === layer else { return }
-                    self.cancelled = true
-                    self.placeAtCards(layer, root: root, limits: limits)
-                }
-                guard !layer.lift.images.isEmpty else { finish(); return true }
-                let size = layer.lift.naturalSize
-                offset = visual == nil
-                    ? NSPoint(x: start.x - sourceRect.minX, y: start.y - sourceRect.minY)
-                    : NSPoint(x: size.width / 2, y: size.height - 10)
-                root.addSubview(layer)
-                NSCursor.closedHand.push(); cursorPushed = true
-            }
-            guard let lifted else { continue }
-            let now = ProcessInfo.processInfo.systemUptime
-            if now - lastScroll >= 1.0 / 30.0 { autoscroll(point); lastScroll = now }
-            let bounds = limits()
-            selection = bounds.contains(point) ? proposal(point) : nil
-            let useBundle = bundleAt?(point, selection) ?? false
-            if useBundle != bundled {
-                bundled = useBundle; refresh()
-            }
-            let natural = lifted.lift.naturalSize
-            let maximumWidth: CGFloat = visual == nil ? bounds.width : min(bounds.width, 260)
-            let maximumHeight: CGFloat = visual == nil ? bounds.height : min(bounds.height, 120)
+        sessionValid = { [weak button, weak window, weak root] in
+            guard let button, let window, let root, button.window === window, root.window === window,
+                  button.superview != nil else { return false }
+            return valid()
+        }
+        let alive: () -> Bool = { [weak self, weak layer, weak window] in
+            guard let self, let layer, let window else { return false }
+            return self.captureGeneration == generation && !self.cancelled
+                && self.overlay === layer && self.sessionValid?() == true && self.windowAvailable(window)
+        }
+        let place: () -> Void = { [weak self, weak layer] in
+            guard let self, let layer, self.overlay === layer else { return }
+            let bounds = limits(), natural = layer.lift.naturalSize
+            let maximumWidth = visual == nil ? bounds.width : min(bounds.width, 260)
+            let maximumHeight = visual == nil ? bounds.height : min(bounds.height, 120)
             let scale = min(1, maximumWidth / max(1, natural.width), maximumHeight / max(1, natural.height))
             let size = NSSize(width: natural.width * scale, height: natural.height * scale)
-            let anchorY = offset.y + (lifted.lift.bundled ? 12 : 0)
-            lifted.lift.frame = TavernDragGeometry.clamped(NSRect(x: point.x - offset.x * scale, y: point.y - anchorY * scale,
-                                                                 width: size.width, height: size.height), inside: bounds)
-            lifted.advanceGather(inside: bounds)
-            lifted.update(limits: bounds, proposal: selection)
-            if released { break }
+            let anchorY = state.offset.y + (layer.lift.bundled ? 12 : 0)
+            layer.lift.frame = TavernDragGeometry.clamped(NSRect(x: state.point.x - state.offset.x * scale,
+                y: state.point.y - anchorY * scale, width: size.width, height: size.height), inside: bounds)
+            layer.advanceGather(inside: bounds)
+            layer.update(limits: bounds, proposal: bounds.contains(state.point) ? proposal(state.point) : nil)
         }
-        guard let lifted, overlay === lifted else { return true }
-        if !cancelled, valid(), window.isVisible, window.isKeyWindow, let selection {
-            // Сервер не ждёт пружины; оригиналы остаются скрыты до её завершения.
+        let release: () -> Void = { [weak self, weak layer, weak root] in
+            guard let self, let layer, let root, !state.performed, let point = state.releasePoint else { return }
+            guard alive() else { self.cancel(); return }
+            guard limits().contains(point), let selection = proposal(point) else {
+                self.returnVisual?(); return
+            }
+            state.performed = true
             if visual == nil {
-                let previous = lifted.cards.map { $0.convert($0.bounds, to: root) }
-                // Новая раскладка может опередить ответ публичного API.
-                // Начинаем постановку сразу по её публикации, а не ждём второго канала.
-                placeWhenLayoutChanges = { [weak self, weak lifted, weak root] in
-                    guard let self, let lifted, let root, !self.tracking, !lifted.returning,
-                          self.overlay === lifted else { return }
-                    let moved = lifted.cards.enumerated().contains { index, card in
+                let previous = layer.cards.map { $0.convert($0.bounds, to: root) }
+                self.placeWhenLayoutChanges = { [weak self, weak layer, weak root] in
+                    guard let self, let layer, let root, !self.tracking, !layer.returning,
+                          self.overlay === layer else { return }
+                    if layer.cards.enumerated().contains(where: { index, card in
                         index >= previous.count || card.convert(card.bounds, to: root) != previous[index]
-                    }
-                    if moved { self.placeAtCards(lifted, root: root, limits: limits) }
+                    }) { self.placeAtCards(layer, root: root, limits: limits) }
                 }
             }
-            perform(selection.target) { [weak self, weak lifted] changed in
-                guard let self, let lifted, self.overlay === lifted, !self.cancelled else { return }
-                self.refresh()
-                guard self.overlay === lifted else { return }
+            perform(selection.target) { [weak self, weak layer, weak root] changed in
+                guard let self, let layer, let root, alive() else { return }
+                guard self.overlay === layer else { return }
                 if changed, visual != nil {
-                    let size = lifted.lift.frame.size
-                    let destination = NSRect(x: selection.rect.midX - size.width / 2,
-                                             y: selection.rect.midY - size.height / 2, width: size.width, height: size.height)
-                    self.settle(lifted, to: destination, limits: limits)
-                } else if !lifted.returning {
-                    self.placeAtCards(lifted, root: root, limits: limits)
+                    let size = layer.lift.frame.size
+                    self.settle(layer, to: NSRect(x: selection.rect.midX - size.width / 2,
+                        y: selection.rect.midY - size.height / 2, width: size.width, height: size.height), limits: limits)
+                } else if !layer.returning { self.placeAtCards(layer, root: root, limits: limits) }
+            }
+        }
+        refreshVisual = { [weak self, weak layer, weak root] in
+            guard let self, let layer, let root, alive(), !layer.returning, state.thresholdCrossed else { return }
+            if state.inFlight { state.latest = true; return }
+            let available = members?() ?? [button]
+            let selected = available.first { $0.accessibilityIdentifier() == sourceID } ?? button
+            let cards = state.bundled ? [selected] + available.filter { $0 !== selected } : [selected]
+            let bundled = state.bundled
+            let keys = cards.map { CaptureKey(identity: ObjectIdentifier($0), revision: ($0 as? TavernButton)?.dragVisualRevision ?? 0) }
+            // Keep only reusable revisions for this group, not a history of
+            // every title/status/feedback change during a long gesture.
+            if self.imageCache.keys.contains(where: { !keys.contains($0) }) {
+                self.imageCache = self.imageCache.filter { keys.contains($0.key) }
+            }
+            state.inFlight = true
+            var images = [NSImage?](repeating: nil, count: visual == nil ? cards.count : 1)
+            var remaining = images.count
+            var failed = false
+            let accept: (Int, Result<NSImage, Error>) -> Void = { [weak self, weak layer, weak root] index, result in
+                guard let self, let layer, let root, alive(), !failed else { return }
+                switch result {
+                case .failure: failed = true; self.cancel(); return
+                case .success(let image):
+                    images[index] = image
+                    if visual == nil, cards[index] is TavernButton { self.imageCache[keys[index]] = image }
+                }
+                remaining -= 1
+                guard remaining == 0 else { return }
+                state.inFlight = false
+                let currentAvailable = members?() ?? [button]
+                let currentSelected = currentAvailable.first { $0.accessibilityIdentifier() == sourceID } ?? button
+                let currentCards = state.bundled
+                    ? [currentSelected] + currentAvailable.filter { $0 !== currentSelected } : [currentSelected]
+                let currentKeys = currentCards.map {
+                    CaptureKey(identity: ObjectIdentifier($0), revision: ($0 as? TavernButton)?.dragVisualRevision ?? 0)
+                }
+                if currentKeys != keys || bundled != state.bundled { state.latest = true }
+                if state.latest {
+                    state.latest = false
+                    self.refreshVisual?()
+                    return
+                }
+                guard !layer.returning else { return }
+                let oldFrames = layer.renderedCardFrames(), oldCards = layer.cards
+                let wasBundled = layer.lift.bundled
+                layer.lift.configure(images: images.compactMap { $0 }, bundled: bundled)
+                layer.cards = cards
+                self.conceal(cards.map { $0 as NSView } + (connections?(cards) ?? []))
+                if layer.superview == nil { root.addSubview(layer) }
+                state.offset = visual == nil ? NSPoint(x: start.x - sourceRect.minX, y: start.y - sourceRect.minY)
+                    : NSPoint(x: layer.lift.naturalSize.width / 2, y: layer.lift.naturalSize.height - 10)
+                place()
+                if layer.lift.bundled && !wasBundled {
+                    layer.gather(from: cards.map { card in
+                        if let index = oldCards.firstIndex(where: { $0 === card }), index < oldFrames.count { return oldFrames[index] }
+                        return TavernDragGeometry.fitted(card.convert(card.bounds, to: root), inside: limits())
+                    })
+                    self.startGatherClock(layer, limits: limits)
+                } else if !layer.lift.bundled { layer.stopFlight() }
+                else if !layer.flight.images.isEmpty { layer.flight.images = layer.lift.images }
+                if state.releasePoint != nil { release() }
+            }
+            if let visual {
+                if let image = visual() { accept(0, .success(image)) }
+                else { accept(0, .failure(NSError(domain: "TavernNavigationDrag", code: 2))) }
+            } else {
+                for index in cards.indices {
+                    if cards[index] is TavernButton, let image = self.imageCache[keys[index]] { accept(index, .success(image)) }
+                    else { self.requestImage(of: cards[index]) { accept(index, $0) } }
                 }
             }
-        } else {
-            placeAtCards(lifted, root: root, limits: limits)
         }
+        overlay = layer
+        escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] key in
+            guard key.keyCode == 53, self?.overlay === layer else { return key }
+            self?.returnVisual?()
+            return nil
+        }
+        let timer = Timer(timeInterval: 1.0 / 60, repeats: true) { [weak self, weak window] _ in
+            guard let self, let window else { return }
+            if self.sessionValid?() != true || !self.windowAvailable(window) { self.cancel() }
+        }
+        lifecycle = timer; RunLoop.main.add(timer, forMode: .common)
+        returnVisual = { [weak self, weak layer] in
+            guard let self, let layer, self.overlay === layer else { return }
+            guard !layer.lift.images.isEmpty else { self.cancel(); return }
+            self.cancelled = true
+            self.placeAtCards(layer, root: root, limits: limits)
+        }
+        while alive() {
+            let next: NSEvent?
+            #if TAVERN_RENDER_TESTING
+            if let nextEventForTesting { next = nextEventForTesting() }
+            else { next = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp, .keyDown],
+                until: Date(timeIntervalSinceNow: 1.0 / 60), inMode: .eventTracking, dequeue: true) }
+            #else
+            next = window.nextEvent(matching: [.leftMouseDragged, .leftMouseUp, .keyDown],
+                until: Date(timeIntervalSinceNow: 1.0 / 60), inMode: .eventTracking, dequeue: true)
+            #endif
+            guard alive() else { break }
+            if let next {
+                if next.type == .keyDown {
+                    if next.keyCode == 53 { returnVisual?(); break }
+                    continue
+                }
+                state.point = root.convert(next.locationInWindow, from: nil)
+                if !state.thresholdCrossed, hypot(state.point.x - start.x, state.point.y - start.y) >= 6 {
+                    state.thresholdCrossed = true
+                    state.bundled = bundleAt?(state.point, proposal(state.point)) ?? false
+                    refreshVisual?()
+                    if !cursorPushed { NSCursor.closedHand.push(); cursorPushed = true }
+                }
+                if next.type == .leftMouseUp {
+                    if !state.thresholdCrossed {
+                        let click = button.convert(button.bounds, to: root).contains(state.point)
+                        finish()
+                        if click { button.performClick(nil) }
+                    } else {
+                        state.releasePoint = state.point
+                        let bounds = limits()
+                        let selection = bounds.contains(state.point) ? proposal(state.point) : nil
+                        let useBundle = bundleAt?(state.point, selection) ?? false
+                        if useBundle != state.bundled {
+                            state.bundled = useBundle
+                            refreshVisual?()
+                        }
+                        if alive(), !state.inFlight, !state.performed, !layer.returning { place(); release() }
+                    }
+                    return true
+                }
+            }
+            guard state.thresholdCrossed else { continue }
+            let now = ProcessInfo.processInfo.systemUptime
+            if now - lastScroll >= 1.0 / 30 { autoscroll(state.point); lastScroll = now }
+            let selection = limits().contains(state.point) ? proposal(state.point) : nil
+            let useBundle = bundleAt?(state.point, selection) ?? false
+            if useBundle != state.bundled { state.bundled = useBundle; refresh() }
+            if !layer.lift.images.isEmpty { place() }
+        }
+        if !layer.returning { cancel() }
         return true
     }
 
@@ -552,6 +646,7 @@ final class TavernNavigationDrag {
     private func settle(_ overlay: TavernDragOverlay, to target: NSRect, limits: @escaping () -> NSRect) {
         guard TavernMotion.enabled else { finish(); return }
         animation?.invalidate()
+        overlay.returning = true
         let from = overlay.lift.frame
         let destination = NSRect(x: target.midX - from.width / 2, y: target.midY - from.height / 2, width: from.width, height: from.height)
         let start = ProcessInfo.processInfo.systemUptime

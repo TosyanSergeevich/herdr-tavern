@@ -171,15 +171,10 @@ final class AgentIntegrationService {
     }
 
     private func enqueue<T>(completion: @escaping (Result<T, Error>) -> Void, operation: @escaping (String) throws -> T) {
-        // Resolve launch options on main, but never run a subprocess there.
-        let resolve = { [self] in
-            let selected = Result { try executable() }
-            worker.async {
-                let result = selected.flatMap { path in Result { try operation(path) } }
-                DispatchQueue.main.async { completion(result) }
-            }
+        worker.async { [self] in
+            let result = Result { try operation(executable()) }
+            DispatchQueue.main.async { completion(result) }
         }
-        if Thread.isMainThread { resolve() } else { DispatchQueue.main.async(execute: resolve) }
     }
 
     private func environment(target: String? = nil) throws -> [String: String] {

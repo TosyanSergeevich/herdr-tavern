@@ -54,10 +54,19 @@ float overheadVisibility(texture2d<float> heights, float3 p, float3 light, float
     }
     return mix(.45f, 1.0f, result);
 }
+fragment float tavernCardShadowFragment(CardVertex in [[stage_in]],
+    constant CardUniforms &u [[buffer(0)]], texture2d<float> heights [[texture(1)]]) {
+    float2 size = u.geometry.xy;
+    float z = heightAt(heights, in.uv);
+    float3 p = float3(in.uv * size, z);
+    return visibility(heights, p, u.lamp.xyz, size);
+}
+
 fragment float4 tavernCardFragment(CardVertex in [[stage_in]],
     constant CardUniforms &u [[buffer(0)]],
     texture2d<float> albedo [[texture(0)]], texture2d<float> heights [[texture(1)]],
-    texture2d<float> normals [[texture(2)]], texture2d<float> materials [[texture(3)]]) {
+    texture2d<float> normals [[texture(2)]], texture2d<float> materials [[texture(3)]],
+    texture2d<float, access::read> lampVisibility [[texture(4)]]) {
     float4 source = straightSample(albedo, in.uv);
     if (source.a < .001f) return float4(0);
     float2 size = u.geometry.xy;
@@ -71,7 +80,7 @@ fragment float4 tavernCardFragment(CardVertex in [[stage_in]],
     float3 p = float3(in.uv * size, z);
     float3 delta = u.lamp.xyz - p;
     float3 light = normalize(delta);
-    float shadow = visibility(heights, p, u.lamp.xyz, size);
+    float shadow = lampVisibility.read(uint2(in.position.xy)).r;
     float nearOccluder = max(max(heightAt(heights, in.uv + dx * 4), heightAt(heights, in.uv - dx * 4)),
         max(heightAt(heights, in.uv + dy * 4), heightAt(heights, in.uv - dy * 4))) - z;
     float ao = 1 - .2f * smoothstep(.4f, 7.0f, nearOccluder);

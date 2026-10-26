@@ -1,5 +1,9 @@
 import AppKit
 
+#if !TAVERN_RENDER_TESTING
+#error("SurfaceLinkTests requires -D TAVERN_RENDER_TESTING")
+#endif
+
 @main struct SurfaceLinkTests {
     static func main() throws {
         _ = NSApplication.shared
@@ -8,6 +12,16 @@ import AppKit
                                                       boldItalic: font, symbols: font))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 40), styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = surface
+        var hoverLocation: NSPoint?
+        var hoverFlags: NSEvent.ModifierFlags = []
+        #if TAVERN_RENDER_TESTING
+        surface.linkHoverEnvironment = { (hoverLocation, hoverFlags, true) }
+        #endif
+        func waitUntil(_ condition: () -> Bool) {
+            let deadline = Date(timeIntervalSinceNow: 2)
+            while !condition(), Date() < deadline { RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.005)) }
+            precondition(condition(), "Hover completion timed out")
+        }
         var sent: [[String: Any]] = [], opened: [URL] = [], menus = 0
         surface.send = { sent.append($0) }
         surface.openLink = { opened.append($0) }
@@ -17,7 +31,7 @@ import AppKit
             try surface.apply(metadata: ["boot_id": "links", "projection_revision": 1, "surface_revision": patch ? 2 : 1,
                                          "base_surface_revision": 1, "width": cells.count, "height": 1,
                                          "hyperlinks": links, "panes": [["pane_id": "p", "inner_rect": rect, "focused": true, "mouse_reporting": true]]],
-                              segments: [CellSegment(x: 0, y: 0, cells: cells)], assets: [], patch: patch)
+                              segments: [CellSegment(x: 0, y: 0, cells: cells)], images: [:], patch: patch)
         }
         func click(_ x: Int, flags: NSEvent.ModifierFlags, right: Bool = false) {
             sent.removeAll(); opened.removeAll(); menus = 0
@@ -46,11 +60,14 @@ import AppKit
         let hover = NSEvent.mouseEvent(with: .mouseMoved, location: surface.convert(NSPoint(x: 4, y: 10), to: nil),
                                        modifierFlags: .command, timestamp: 0, windowNumber: window.windowNumber,
                                        context: nil, eventNumber: 1, clickCount: 0, pressure: 0)!
+        hoverLocation = hover.locationInWindow; hoverFlags = .command
         surface.mouseMoved(with: hover)
+        waitUntil { surface.toolTip == target.absoluteString }
         precondition(surface.toolTip == target.absoluteString && NSCursor.current == NSCursor.pointingHand && sent.isEmpty)
         let unmodified = NSEvent.mouseEvent(with: .mouseMoved, location: hover.locationInWindow, modifierFlags: [],
                                             timestamp: 0, windowNumber: window.windowNumber, context: nil,
                                             eventNumber: 2, clickCount: 0, pressure: 0)!
+        hoverFlags = []
         surface.mouseMoved(with: unmodified)
         precondition(surface.toolTip == nil && NSCursor.current != NSCursor.pointingHand)
         print("PASS: наведение показывает адрес и курсор-руку; снятие модификатора возвращает обычную мышь")

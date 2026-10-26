@@ -348,10 +348,11 @@ class TavernButton: NSButton {
     private var boardImage: NSImage?
     private var boardSize = NSSize.zero
     private var artwork: NSImage?
-    var symbolName: String?
+    var symbolName: String? { didSet { if symbolName != oldValue { dragVisualVersion &+= 1 } } }
     var role: TavernButtonRole = .tool {
         didSet {
             guard role != oldValue else { return }
+            dragVisualVersion &+= 1
             boardImage = nil
             updateMaterialImage()
             needsLayout = true
@@ -373,6 +374,30 @@ class TavernButton: NSButton {
     private let pressShade = CALayer()
     private var feedbackPrepared = false
     private var pressed = false
+    private struct DragGeometry: Equatable {
+        let bounds: NSRect
+        let backingScale: CGFloat
+        let language: TavernLanguage
+    }
+    private struct DragFeedback: Equatable {
+        let hovered: Bool
+        let pressed: Bool
+        let enabled: Bool
+    }
+    private var dragVisualVersion: UInt64 = 0
+    private var dragGeometry: DragGeometry?
+    private var dragFeedback: DragFeedback?
+    private var dragIdentity = ""
+    private var dragAgentStatus: TavernAgentVisualStatus?
+    var dragVisualRevision: UInt64 {
+        let geometry = DragGeometry(bounds: bounds, backingScale: window?.backingScaleFactor ?? 2,
+                                    language: TavernLocalization.shared.language)
+        if dragGeometry != geometry {
+            dragGeometry = geometry
+            dragVisualVersion &+= 1
+        }
+        return dragVisualVersion
+    }
     private var isTopTab: Bool { style == .tab || style == .addTab }
     private var usesButtonSkin: Bool { style == .utility }
     private var usesIconSkin: Bool { title == "⋯" || title == "+" || (title.isEmpty && symbolName != nil) }
@@ -436,6 +461,11 @@ class TavernButton: NSButton {
     }
 
     private func updateFeedback(animated: Bool = true) {
+        let feedback = DragFeedback(hovered: hovered, pressed: pressed, enabled: isEnabled)
+        if dragFeedback != feedback {
+            dragFeedback = feedback
+            dragVisualVersion &+= 1
+        }
         guard feedbackPrepared else { return }
         let duration = animated ? TavernMotion.hoverDuration : 0
         needsDisplay = true
@@ -448,7 +478,11 @@ class TavernButton: NSButton {
     override func layout() {
         super.layout()
         updateMaterialImage()
-        cardSurface?.frame = bounds.insetBy(dx: 3, dy: 3)
+        if let cardSurface {
+            let frame = bounds.insetBy(dx: 3, dy: 3)
+            if cardSurface.frame != frame { cardSurface.frame = frame }
+            cardSurface.layoutSubtreeIfNeeded()
+        }
         cardText?.frame = bounds
         talisman?.frame = bounds
         guard feedbackPrepared else { return }
@@ -480,7 +514,9 @@ class TavernButton: NSButton {
 
     override var title: String {
         didSet {
-            guard title != oldValue, !titleAttributes.isEmpty else { return }
+            guard title != oldValue else { return }
+            dragVisualVersion &+= 1
+            guard !titleAttributes.isEmpty else { return }
             updateRenderedTitle()
             invalidateIntrinsicContentSize()
             cardText?.needsDisplay = true
@@ -494,6 +530,11 @@ class TavernButton: NSButton {
     }
 
     func prepare(style: Style, selected: Bool = false, subtitle: String = "", context: String = "", indicator: NSColor? = nil, unread: AgentUnreadKind? = nil, identity: String = "") {
+        if self.style != style || self.selected != selected || self.indicator != indicator || self.unread != unread
+            || renderedSubtitle.string != subtitle || renderedContext.string != context || dragIdentity != identity {
+            dragVisualVersion &+= 1
+        }
+        dragIdentity = identity
         let artwork: NSImage?
         if style == .addTab {
             artwork = materials.addButton
@@ -578,27 +619,48 @@ class TavernButton: NSButton {
         needsDisplay = true
     }
     func setAgentVisualStatus(_ status: TavernAgentVisualStatus?) {
+        if dragAgentStatus != status { dragAgentStatus = status; dragVisualVersion &+= 1 }
         talisman?.configure(status: status)
         cardSurface?.refreshLighting()
     }
-    func dragImage() -> NSImage? {
+    func requestDragImage(completion: @escaping (Result<NSImage, Error>) -> Void) {
+        precondition(Thread.isMainThread)
         layoutSubtreeIfNeeded()
-        guard let bitmap = bitmapImageRepForCachingDisplay(in: bounds) else { return nil }
-        cacheDisplay(in: bounds, to: bitmap)
-        if let cardSurface {
-            guard let material = cardSurface.snapshotImage(),
-                  let context = NSGraphicsContext(bitmapImageRep: bitmap)?.cgContext else { return nil }
-            let frame = cardSurface.frame
-            let rect = NSRect(x: frame.minX, y: isFlipped ? bounds.height - frame.maxY : frame.minY,
-                              width: frame.width, height: frame.height)
-            context.saveGState()
-            context.setBlendMode(.destinationOver)
-            context.draw(material, in: rect)
-            context.restoreGState()
+        guard let bitmap = bitmapImageRepForCachingDisplay(in: bounds) else {
+            RunLoop.main.perform(inModes: [.default, .eventTracking, .modalPanel]) {
+                completion(.failure(NativeError.message(L("core.card.snapshotUnavailable"))))
+            }
+            return
         }
-        let image = NSImage(size: bounds.size)
-        image.addRepresentation(bitmap)
-        return image
+        cacheDisplay(in: bounds, to: bitmap)
+        let size = bounds.size
+        guard let cardSurface else {
+            let image = NSImage(size: size)
+            image.addRepresentation(bitmap)
+            RunLoop.main.perform(inModes: [.default, .eventTracking, .modalPanel]) { completion(.success(image)) }
+            return
+        }
+        let frame = cardSurface.frame
+        let rect = NSRect(x: frame.minX, y: isFlipped ? size.height - frame.maxY : frame.minY,
+                          width: frame.width, height: frame.height)
+        cardSurface.requestSnapshot { result in
+            precondition(Thread.isMainThread)
+            switch result {
+            case .failure(let error): completion(.failure(error))
+            case .success(let material):
+                guard let context = NSGraphicsContext(bitmapImageRep: bitmap)?.cgContext else {
+                    completion(.failure(NativeError.message(L("core.card.snapshotUnavailable"))))
+                    return
+                }
+                context.saveGState()
+                context.setBlendMode(.destinationOver)
+                context.draw(material, in: rect)
+                context.restoreGState()
+                let image = NSImage(size: size)
+                image.addRepresentation(bitmap)
+                completion(.success(image))
+            }
+        }
     }
     override var intrinsicContentSize: NSSize {
         guard style == .utility else { return super.intrinsicContentSize }

@@ -630,3 +630,10 @@ fn superseded_surface_from_another_boot_still_closes_the_connection() {
         [event::ERROR, event::CLOSED]
     );
 }
+
+#[test]
+fn snapshot_schema_is_validated_before_publication() {
+    let mut snapshot = super::socket_tests::snapshot_json();
+    snapshot["panes"] = json!({"not": "an array"});
+    assert!(receive_snapshots([snapshot]).is_err());
+}

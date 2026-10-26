@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 
 // Apache-2.0: native rendering and input behavior adapted from the herdr surface
 // research for upstream revision 2563803dca97c040beaf3dc3acdcb5a3221b4238.
@@ -30,41 +31,51 @@ struct NativeEvent {
     let metadata: [String: Any]
     let segments: [CellSegment]
     let popupSegments: [CellSegment]
-    let assets: [GraphicAsset]
-    init(_ event: OpaquePointer) throws {
-        kind = tavern_event_kind(event)
-        let data = bytesData(tavern_event_json(event))
-        guard let parsed = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw NativeError.message(L("core.connection.invalidMetadata"))
-        }
-        metadata = parsed
-        var main: [CellSegment] = [], popup: [CellSegment] = []
-        for index in 0..<tavern_event_segment_count(event) {
-            var segment = TavernSegment()
-            guard tavern_event_segment(event, index, &segment) == 0 else { throw NativeError.message(L("core.connection.unavailableSegment")) }
-            var cells: [TerminalCell] = []
-            cells.reserveCapacity(segment.count)
-            for offset in 0..<segment.count {
-                var cell = TavernCell()
-                guard tavern_event_cell(event, index, offset, &cell) == 0 else { throw NativeError.message(L("core.connection.unavailableCell")) }
-                cells.append(TerminalCell(symbol: bytesString(cell.symbol), foreground: cell.fg, background: cell.bg,
-                                          modifier: cell.modifier, skip: cell.skip != 0,
-                                          hyperlink: cell.hyperlink_present != 0 ? cell.hyperlink : nil))
+    let images: [String: CGImage]
+    let navigationPresentation: TavernNavigationPresentation?
+    init(taking event: OpaquePointer) throws {
+        // All borrowed buffers are copied while the event is alive. Release the
+        // native allocation before potentially expensive raster preparation.
+        let copied: (UInt32, [String: Any], [CellSegment], [CellSegment], [GraphicAsset]) = try {
+            defer { tavern_event_free(event) }
+            let kind = tavern_event_kind(event)
+            let data = bytesData(tavern_event_json(event))
+            guard let metadata = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                throw NativeError.message(L("core.connection.invalidMetadata"))
             }
-            let span = CellSegment(x: Int(segment.x), y: Int(segment.y), cells: cells)
-            if segment.target == 0 { main.append(span) }
-            else if segment.target == 1 { popup.append(span) }
-            else { throw NativeError.message(L("core.connection.unknownSurface")) }
-        }
-        segments = main; popupSegments = popup
-        var graphics: [GraphicAsset] = []
-        for index in 0..<tavern_event_asset_count(event) {
-            var asset = TavernAsset()
-            guard tavern_event_asset(event, index, &asset) == 0 else { throw NativeError.message(L("core.connection.unavailableAsset")) }
-            graphics.append(GraphicAsset(id: bytesString(asset.id), width: Int(asset.width), height: Int(asset.height),
-                                         format: Int(asset.format), data: bytesData(asset.data)))
-        }
-        assets = graphics
+            var main: [CellSegment] = [], popup: [CellSegment] = []
+            for index in 0..<tavern_event_segment_count(event) {
+                var segment = TavernSegment()
+                guard tavern_event_segment(event, index, &segment) == 0 else { throw NativeError.message(L("core.connection.unavailableSegment")) }
+                var cells: [TerminalCell] = []
+                cells.reserveCapacity(segment.count)
+                for offset in 0..<segment.count {
+                    var cell = TavernCell()
+                    guard tavern_event_cell(event, index, offset, &cell) == 0 else { throw NativeError.message(L("core.connection.unavailableCell")) }
+                    cells.append(TerminalCell(symbol: bytesString(cell.symbol), foreground: cell.fg, background: cell.bg,
+                                              modifier: cell.modifier, skip: cell.skip != 0,
+                                              hyperlink: cell.hyperlink_present != 0 ? cell.hyperlink : nil))
+                }
+                let span = CellSegment(x: Int(segment.x), y: Int(segment.y), cells: cells)
+                if segment.target == 0 { main.append(span) }
+                else if segment.target == 1 { popup.append(span) }
+                else { throw NativeError.message(L("core.connection.unknownSurface")) }
+            }
+            var graphics: [GraphicAsset] = []
+            for index in 0..<tavern_event_asset_count(event) {
+                var asset = TavernAsset()
+                guard tavern_event_asset(event, index, &asset) == 0 else { throw NativeError.message(L("core.connection.unavailableAsset")) }
+                graphics.append(GraphicAsset(id: bytesString(asset.id), width: Int(asset.width), height: Int(asset.height),
+                                             format: Int(asset.format), data: bytesData(asset.data)))
+            }
+            return (kind, metadata, main, popup, graphics)
+        }()
+        kind = copied.0; metadata = copied.1
+        segments = copied.2; popupSegments = copied.3
+        var prepared: [String: CGImage] = [:]
+        for asset in copied.4 { prepared[asset.id] = try GraphicAssetDecoder.decode(asset) }
+        images = prepared
+        navigationPresentation = kind == UInt32(TAVERN_SNAPSHOT) ? TavernNavigationPresentation(snapshot: metadata) : nil
     }
 }
 
@@ -74,6 +85,17 @@ final class RustConnection {
     private let calls = DispatchGroup()
     private let lock = NSLock()
     private var closing = false
+    private struct PendingWrite {
+        var command: [String: Any]
+        var completions: [(Error?) -> Void]
+    }
+    private var pendingWrites: [PendingWrite?] = []
+    private var writeHead = 0
+    private var draining = false
+    #if TAVERN_RENDER_TESTING
+    var beforeWriterDrain: (() -> Void)?
+    var beforeWriterSerialization: (([String: Any]) -> Void)?
+    #endif
     private let receive: (Result<NativeEvent, Error>) -> Void
     init(pointer: OpaquePointer, receive: @escaping (Result<NativeEvent, Error>) -> Void) {
         self.pointer = pointer; self.receive = receive
@@ -98,8 +120,7 @@ final class RustConnection {
                         return false
                     }
                     let decoded: Result<NativeEvent, Error>
-                    do { decoded = .success(try NativeEvent(event)) } catch { decoded = .failure(error) }
-                    tavern_event_free(event)
+                    do { decoded = .success(try NativeEvent(taking: event)) } catch { decoded = .failure(error) }
                     // Bounded hand-off: reader never queues unbounded full surfaces. No UI
                     // thread waits for this worker; detach interrupts next_event separately.
                     DispatchQueue.main.sync { receive(decoded) }
@@ -109,27 +130,135 @@ final class RustConnection {
             close()
         }
     }
-    func send(_ command: [String: Any], completion: @escaping (Error?) -> Void) {
-        let data: Data
-        do { data = try JSONSerialization.data(withJSONObject: command) }
-        catch { completion(error); return }
-        lock.lock()
-        guard !closing else { lock.unlock(); completion(NativeError.message(L("core.connection.closed"))); return }
-        calls.enter(); lock.unlock()
-        writer.async { [self] in
-            defer { calls.leave() }
-            var error: UnsafeMutablePointer<CChar>?
-            let result = data.withUnsafeBytes { bytes in
-                tavern_client_send_json(pointer, bytes.bindMemory(to: UInt8.self).baseAddress, bytes.count, &error)
+    // Swift value collections share immutable storage until changed. Copy only
+    // paths containing reference-backed Foundation values before admission.
+    private static func ownedValue(_ value: Any) -> Any? {
+        if type(of: value) is AnyClass {
+            if let string = value as? NSMutableString { return string.copy() as! NSString }
+            if let data = value as? NSMutableData { return Data(bytes: data.bytes, count: data.length) }
+            if let dictionary = value as? NSDictionary {
+                var result: [AnyHashable: Any] = [:]
+                result.reserveCapacity(dictionary.count)
+                for (key, child) in dictionary {
+                    result[key as! AnyHashable] = ownedValue(child) ?? child
+                }
+                return NSDictionary(dictionary: result)
             }
-            let failure: Error? = result == 0 ? nil : NativeError.message(ownedString(error))
-            DispatchQueue.main.async { completion(failure) }
+            if let array = value as? NSArray { return array.map { ownedValue($0) ?? $0 } }
+            return nil
         }
+        if type(of: value) == [String].self || type(of: value) == [String: String].self { return nil }
+        if let dictionary = value as? [String: Any] {
+            var result: [String: Any]?
+            for (key, child) in dictionary {
+                if let owned = ownedValue(child) {
+                    if result == nil { result = dictionary }
+                    result?[key] = owned
+                }
+            }
+            return result
+        }
+        if let array = value as? [Any] {
+            var result: [Any]?
+            for (index, child) in array.enumerated() {
+                if let owned = ownedValue(child) {
+                    if result == nil { result = array }
+                    result?[index] = owned
+                }
+            }
+            return result
+        }
+        return nil
     }
+
+    private static func complete(_ callbacks: [(Error?) -> Void], with error: Error?) {
+        DispatchQueue.main.async { for callback in callbacks { callback(error) } }
+    }
+
+    func send(_ command: [String: Any], completion: @escaping (Error?) -> Void) {
+        let captured = Self.ownedValue(command) as? [String: Any] ?? command
+        lock.lock()
+        guard !closing else {
+            lock.unlock()
+            Self.complete([completion], with: NativeError.message(L("core.connection.closed")))
+            return
+        }
+        let last = pendingWrites.count - 1
+        if last >= writeHead, string(captured["type"]) == "resize",
+           string(pendingWrites[last]?.command["type"]) == "resize" {
+            pendingWrites[last]?.command = captured
+            pendingWrites[last]?.completions.append(completion)
+        } else {
+            pendingWrites.append(PendingWrite(command: captured, completions: [completion]))
+        }
+        if !draining {
+            draining = true
+            calls.enter()
+            #if TAVERN_RENDER_TESTING
+            let drainGate = beforeWriterDrain
+            let serializationGate = beforeWriterSerialization
+            #endif
+            writer.async { [self] in
+                defer { calls.leave() }
+                #if TAVERN_RENDER_TESTING
+                drainGate?()
+                #endif
+                while true {
+                    lock.lock()
+                    guard !closing, writeHead < pendingWrites.count else {
+                        pendingWrites.removeAll(keepingCapacity: true)
+                        writeHead = 0; draining = false
+                        lock.unlock()
+                        return
+                    }
+                    let entry = pendingWrites[writeHead]!
+                    pendingWrites[writeHead] = nil
+                    writeHead += 1
+                    if writeHead >= 256 && writeHead >= pendingWrites.count - writeHead {
+                        pendingWrites.removeFirst(writeHead)
+                        writeHead = 0
+                    }
+                    lock.unlock()
+                    let failure: Error? = autoreleasepool {
+                        #if TAVERN_RENDER_TESTING
+                        serializationGate?(entry.command)
+                        #endif
+                        lock.lock(); let closedBeforeEncoding = closing; lock.unlock()
+                        guard !closedBeforeEncoding else { return NativeError.message(L("core.connection.closed")) }
+                        do {
+                            // Darwin Foundation raises an Objective-C exception
+                            // for unsupported objects; Swift catch cannot handle it.
+                            guard JSONSerialization.isValidJSONObject(entry.command) else {
+                                return CocoaError(.propertyListWriteInvalid)
+                            }
+                            let data = try JSONSerialization.data(withJSONObject: entry.command)
+                            lock.lock(); let closedBeforeSending = closing; lock.unlock()
+                            guard !closedBeforeSending else { return NativeError.message(L("core.connection.closed")) }
+                            var error: UnsafeMutablePointer<CChar>?
+                            let result = data.withUnsafeBytes { bytes in
+                                tavern_client_send_json(pointer, bytes.bindMemory(to: UInt8.self).baseAddress, bytes.count, &error)
+                            }
+                            return result == 0 ? nil : NativeError.message(ownedString(error))
+                        } catch { return error }
+                    }
+                    Self.complete(entry.completions, with: failure)
+                }
+            }
+        }
+        lock.unlock()
+    }
+
     func close() {
         lock.lock()
         guard !closing else { lock.unlock(); return }
-        closing = true; calls.enter(); lock.unlock()
+        closing = true
+        var abandoned: [(Error?) -> Void] = []
+        for entry in pendingWrites[writeHead...] { if let entry { abandoned.append(contentsOf: entry.completions) } }
+        pendingWrites.removeAll()
+        writeHead = 0
+        calls.enter()
+        lock.unlock()
+        if !abandoned.isEmpty { Self.complete(abandoned, with: NativeError.message(L("core.connection.closed"))) }
         DispatchQueue.global(qos: .userInitiated).async { [self] in
             tavern_client_close(pointer); calls.leave()
         }

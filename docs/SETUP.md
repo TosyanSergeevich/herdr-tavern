@@ -89,6 +89,24 @@ Tavern does not reproduce the entire herdr interface: custom `keys.command` supp
 
 The interface uses Swift/AppKit; the client and extracted protocol use Rust. Sources are in `app/` and `crates/`; checks are in `tests/` and the Rust packages.
 
+Navigation compares an ordered value projection of displayed fields, prepared on the reader and published with the matching snapshot. Surface geometry independently invalidates pane grips; sheet transitions update their availability even without terminal output. A new connection explicitly receives the current geometry even if it was already computed while opening the socket.
+
+Card materials use exact point/pixel geometry, background preparation and one shared 30 Hz clock. A missing exact map is still built synchronously rather than stretching an old map. Offscreen cards release their own map references; reusable caches retain the existing 96 MiB/72 GPU and 32 MiB/48 CPU budgets, which are not process-memory limits.
+
+Sidebar lighting precomputes source-texel normals and caches exact panel/region/lamp results (up to 8 entries / 4 MiB). Talisman layers retain their existing particle counts and motion formulas while skipping unchanged static geometry and particle properties.
+
+Drag snapshots capture native text, exact geometry and material uniforms together, then read GPU results off the main thread. Originals remain visible until the whole group is ready. Releasing while capture is pending preserves that release point without consuming events from the next gesture; the release point also determines whether the visual capture contains one card or the group.
+
+Sound file reads and import/reset transactions run on a serial worker; AppKit validation and playback remain on main. Playback copies prepared templates, with an 8-entry / 32 MiB encoded-data cache (not a limit on NSSound's decoded memory). Import keeps the previous choice until validation, copying and safe old-file removal succeed.
+
+Outgoing JSON is encoded by one serial writer. Only adjacent, not-yet-started resize commands are combined; input and request commands remain ordered and retain their completions. There is deliberately no new admission limit: a stalled server can still grow the outgoing queue. macOS sockets report interrupted writes as errors rather than terminating the app with SIGPIPE.
+
+Startup prepares Metal source resources and resolves the herdr executable on workers, then continues on main only after both results arrive. Integration executable providers also run on their existing serial worker; subprocess ordering and installer decisions are unchanged.
+
+Rust still validates the full snapshot schema and preserves unknown optional fields in the original JSON value. The input string and typed validation copy are released before publication, and metadata is serialized directly into its owned byte vector; Swift keeps its required copy of borrowed FFI buffers.
+
+Lamp visibility uses one exact `r32Float` texture per visible card. Its key includes material, pixel geometry and the bit patterns of scene geometry/lamp XYZ; flicker and magic remain dynamic. A miss encodes the unchanged visibility calculation before the final pass in the same command buffer, without a CPU wait. The final shader reads the texel without filtering; hidden cards release this texture.
+
 Do not commit local `.env` files, private keys, or certificate exports containing private keys (`.p12`/`.pfx`): `.gitignore` excludes them, along with builds and caches. Sanitized `.env.example` and `.env.sample` templates remain allowed. Ignore rules do not remove already tracked files or data from Git history.
 
 From the repository root:
@@ -98,6 +116,8 @@ cargo +stable test --locked --workspace
 ```
 
 Swift checks are standalone drivers, not an Xcode/XCTest project. Updating the extracted protocol is separate from a normal build; the pinned revision and provenance are recorded in [PROVENANCE.json](../crates/herdr-protocol/PROVENANCE.json).
+
+`ConnectionWriterTests` compiles its standalone Rust Unix-server fixture using the release dependencies already produced by `./build.sh`; it does not download dependencies. Drivers with deterministic rendering, worker or audio hooks require `-D TAVERN_RENDER_TESTING`. Before creating material views, drivers await `TavernCardSurfaceView.prepareResources` with a bounded main runloop.
 
 ## Optional offline resource preparation
 

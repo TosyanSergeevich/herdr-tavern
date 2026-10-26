@@ -30,7 +30,7 @@ import AppKit
             "width":width, "height":height, "panes":[
                 ["pane_id":"left", "focused":false, "inner_rect":["x":0,"y":0,"width":28,"height":height]],
                 right]],
-            segments:[CellSegment(x:0,y:0,cells:cells)], assets:[], patch:false)
+            segments:[CellSegment(x:0,y:0,cells:cells)], images:[:], patch:false)
     }
     static func event(_ type: NSEvent.EventType, column: Int, row: Int = 0, clicks: Int = 1,
                       flags: NSEvent.ModifierFlags = []) -> NSEvent {

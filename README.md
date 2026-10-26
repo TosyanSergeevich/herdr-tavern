@@ -22,7 +22,9 @@ https://github.com/user-attachments/assets/850a079e-4e12-4842-a6ab-5b34cc973784
 
 Closing the window leaves the herdr session running. Closing a pane or tab stops its processes and requires confirmation. Agent programs and model access are configured separately.
 
-Terminal history stays in herdr; Tavern keeps the current screen grid. Temporary receive objects are released after each event, while rendering reuses colors and batches adjacent background fills without reducing the redraw area.
+Terminal history stays in herdr; Tavern keeps the current screen grid. Temporary receive objects are released after each event, and images are decoded into owned rasters on the reader before reaching the UI. Local terminal updates redraw the affected glyph, cursor, selection, and composition regions; full frames and geometry changes still redraw the whole surface. Bitmap glyphs with unknown ink bounds conservatively request a full redraw.
+
+Link hover resolves files in the background with a short-lived cache. Clicking a file link still checks its current existence synchronously.
 
 ## Build and run
 

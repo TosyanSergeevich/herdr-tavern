@@ -46,6 +46,26 @@ pub fn connect(path: &str) -> Result<UnixStream, String> {
             .into());
         }
         let fd = OwnedFd::from_raw_fd(raw);
+        #[cfg(target_os = "macos")]
+        {
+            // This socket bypasses UnixStream::connect's setup. A cancelled
+            // write must return EPIPE, not terminate the hosting Swift process.
+            let enabled: libc::c_int = 1;
+            if libc::setsockopt(
+                raw,
+                libc::SOL_SOCKET,
+                libc::SO_NOSIGPIPE,
+                &enabled as *const _ as *const _,
+                mem::size_of_val(&enabled) as libc::socklen_t,
+            ) < 0
+            {
+                return Err(text(
+                    "Failed to configure Unix socket",
+                    "Не удалось настроить Unix socket",
+                )
+                .into());
+            }
+        }
         if libc::fcntl(raw, libc::F_SETFD, libc::FD_CLOEXEC) < 0
             || libc::fcntl(raw, libc::F_SETFL, libc::O_NONBLOCK) < 0
         {

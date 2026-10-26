@@ -35,6 +35,14 @@ struct TavernTalismanTransition {
         return shouldBurst
     }
 }
+#if TAVERN_RENDER_TESTING
+private struct TavernEffectsTestPolicy {
+    let visible: Bool
+    let reduceMotion: Bool
+    var motionAllowed: Bool { visible && !reduceMotion }
+}
+#endif
+
 
 /// Декоративный подвес над карточкой; hit testing и accessibility остаются у NSButton.
 final class TavernTalismanView: NSView, TavernEffectsClockClient {
@@ -64,6 +72,31 @@ final class TavernTalismanView: NSView, TavernEffectsClockClient {
     private let phase = Double.random(in: 0..<(2 * .pi))
     private var motionAllowed = false
     private var lightColour = SIMD3<Float>(repeating: 0)
+    private struct Geometry: Equatable {
+        let bounds: CGRect
+        let backingScale: CGFloat
+    }
+    private var geometry: Geometry?
+#if TAVERN_RENDER_TESTING
+    private var renderingTestPolicy: TavernEffectsTestPolicy?
+    private var renderingTestBackingScale: CGFloat?
+
+    func setRenderingTestPolicy(visible: Bool, reduceMotion: Bool) {
+        renderingTestPolicy = TavernEffectsTestPolicy(visible: visible, reduceMotion: reduceMotion)
+        TavernEffectsClock.shared.remove(self)
+        setEffectsMotionAllowed(visible && !reduceMotion)
+    }
+
+    func advanceRenderingTestTime(by delta: TimeInterval) {
+        guard renderingTestPolicy?.motionAllowed == true else { return }
+        advanceEffects(by: delta)
+    }
+
+    func setRenderingTestBackingScale(_ scale: CGFloat) {
+        renderingTestBackingScale = scale
+        viewDidChangeBackingProperties()
+    }
+#endif
     private(set) var materialLight: (position: CGPoint, colour: SIMD3<Float>, power: Float)?
 
     override var isFlipped: Bool { true }
@@ -124,7 +157,7 @@ final class TavernTalismanView: NSView, TavernEffectsClockClient {
             innerGlow.contents = resources.glows[status]
             for mote in cloud { mote.soft.contents = resources.soft[status] }
             for mote in burstLayers { mote.soft.contents = resources.soft[status] }
-            if changed && effectsVisible && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            if changed && effectsVisible && !effectsReduceMotion {
                 for _ in 0..<78 { burst.append(TavernBurstParticle()) }
                 burstStart = time
             }
@@ -139,7 +172,7 @@ final class TavernTalismanView: NSView, TavernEffectsClockClient {
         guard hovered != value else { return }
         hovered = value
         if value && transition.status != nil && effectsVisible
-            && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            && !effectsReduceMotion {
             hoverStart = time
         }
         render()
@@ -151,10 +184,17 @@ final class TavernTalismanView: NSView, TavernEffectsClockClient {
         render()
         TavernEffectsClock.shared.refresh()
     }
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        render()
+    }
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        if window == nil { TavernEffectsClock.shared.remove(self) }
-        else { TavernEffectsClock.shared.add(self) }
+        if window == nil {
+            setEffectsMotionAllowed(false)
+            TavernEffectsClock.shared.remove(self)
+        } else { TavernEffectsClock.shared.add(self) }
+        render()
     }
     override func viewDidMoveToSuperview() {
         super.viewDidMoveToSuperview()
@@ -164,12 +204,37 @@ final class TavernTalismanView: NSView, TavernEffectsClockClient {
     override func viewDidUnhide() { super.viewDidUnhide(); TavernEffectsClock.shared.refresh() }
     deinit { TavernEffectsClock.shared.remove(self) }
 
-    fileprivate var effectsVisible: Bool { TavernEffectsClock.visible(self) }
+    private var effectsReduceMotion: Bool {
+#if TAVERN_RENDER_TESTING
+        if let policy = renderingTestPolicy { return policy.reduceMotion }
+#endif
+        return NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
+    private var backingScale: CGFloat {
+#if TAVERN_RENDER_TESTING
+        if let scale = renderingTestBackingScale { return scale }
+#endif
+        return window?.backingScaleFactor ?? 2
+    }
+    fileprivate var effectsVisible: Bool {
+#if TAVERN_RENDER_TESTING
+        if let policy = renderingTestPolicy { return policy.visible }
+#endif
+        return TavernEffectsClock.visible(self)
+    }
     fileprivate var effectsAnimating: Bool {
-        transition.status != nil && (transition.status != .success || burstStart != nil || hoverStart != nil)
+#if TAVERN_RENDER_TESTING
+        if renderingTestPolicy != nil { return false }
+#endif
+        return transition.status != nil && (transition.status != .success || burstStart != nil || hoverStart != nil)
     }
 
-    fileprivate func setEffectsMotionAllowed(_ allowed: Bool) {
+    fileprivate func setEffectsMotionAllowed(_ requested: Bool) {
+#if TAVERN_RENDER_TESTING
+        let allowed = renderingTestPolicy?.motionAllowed ?? requested
+#else
+        let allowed = requested
+#endif
         guard motionAllowed != allowed || (!allowed && (burstStart != nil || hoverStart != nil)) else { return }
         motionAllowed = allowed
         if !allowed {
@@ -204,12 +269,23 @@ final class TavernTalismanView: NSView, TavernEffectsClockClient {
             return
         }
         assembly.isHidden = false
-        assembly.frame = bounds
         let card = bounds.insetBy(dx: 3, dy: 3)
         let scale = Self.visualScale(forCardHeight: card.height)
-        body.shadowRadius = 1.5 * scale
-        body.shadowOffset = CGSize(width: -1.5 * scale, height: 2.5 * scale)
-        body.rasterizationScale = window?.backingScaleFactor ?? 2
+        let mountPoint = CGPoint(x: card.maxX - 38 * scale, y: card.minY + 14 * scale)
+        let nextGeometry = Geometry(bounds: bounds, backingScale: backingScale)
+        if geometry != nextGeometry {
+            assembly.frame = bounds
+            body.shadowRadius = 1.5 * scale
+            body.shadowOffset = CGSize(width: -1.5 * scale, height: 2.5 * scale)
+            body.rasterizationScale = nextGeometry.backingScale
+            mount.bounds = CGRect(x: 0, y: 0, width: 16 * scale, height: 16 * scale)
+            mount.position = mountPoint
+            for link in links {
+                link.bounds = CGRect(x: 0, y: 0, width: 5 * scale, height: 7 * scale)
+            }
+            body.bounds = CGRect(x: 0, y: 0, width: 48 * scale, height: 60 * scale)
+            geometry = nextGeometry
+        }
         let amplitude: CGFloat = motionAllowed ? 1.8 * .pi / 180 : 0
         let idle: CGFloat = status == .success ? 0 : 1
         let reaction: CGFloat
@@ -218,9 +294,6 @@ final class TavernTalismanView: NSView, TavernEffectsClockClient {
             reaction = CGFloat(sin(age * 3.4) * exp(-age * 1.7)) * amplitude * 1.2
         } else { reaction = 0 }
         let angle = amplitude * CGFloat(sin(time * 1.05 + phase)) * idle + reaction
-        let mountPoint = CGPoint(x: card.maxX - 38 * scale, y: card.minY + 14 * scale)
-        mount.bounds = CGRect(x: 0, y: 0, width: 16 * scale, height: 16 * scale)
-        mount.position = mountPoint
         var node = CGPoint(x: mountPoint.x, y: mountPoint.y + 4 * scale)
         for index in links.indices {
             let k = CGFloat(index + 1)
@@ -229,13 +302,11 @@ final class TavernTalismanView: NSView, TavernEffectsClockClient {
             let next = CGPoint(x: node.x + sin(bend) * 4.3 * scale,
                                y: node.y + cos(bend) * 4.3 * scale)
             let link = links[index]
-            link.bounds = CGRect(x: 0, y: 0, width: 5 * scale, height: 7 * scale)
             link.position = CGPoint(x: (node.x + next.x) / 2, y: (node.y + next.y) / 2)
             link.setAffineTransform(CGAffineTransform(rotationAngle: -atan2(next.x - node.x, next.y - node.y)))
             node = next
         }
         let bodyAngle = -angle - amplitude * 0.22 * CGFloat(sin(time * 1.05 + phase - 0.5)) * idle
-        body.bounds = CGRect(x: 0, y: 0, width: 48 * scale, height: 60 * scale)
         body.position = node
         body.setAffineTransform(CGAffineTransform(rotationAngle: bodyAngle))
         let light = CGPoint(x: node.x - sin(bodyAngle) * 28.5 * scale,
@@ -303,14 +374,28 @@ final class TavernTalismanView: NSView, TavernEffectsClockClient {
 /// runeCenter задан в top-left координатах полноразмерного root overlay.
 final class TavernRuneParticlesView: NSView, TavernEffectsClockClient {
     static func validateResources() throws { _ = try TavernTalismanResources.load() }
-    var runeCenter: CGPoint = .zero { didSet { render() } }
-    var visualScale: CGFloat = 1 { didSet { render() } }
+    var runeCenter: CGPoint = .zero { didSet { if runeCenter != oldValue { render() } } }
+    var visualScale: CGFloat = 1 { didSet { if visualScale != oldValue { render() } } }
     private let resources: TavernTalismanResources
     private let glow = CALayer()
     private let motes = (0..<9).map { _ in TavernMoteLayers() }
     private var time: TimeInterval = 0
     private var pulseStart: TimeInterval?
     private var motionAllowed = false
+#if TAVERN_RENDER_TESTING
+    private var renderingTestPolicy: TavernEffectsTestPolicy?
+
+    func setRenderingTestPolicy(visible: Bool, reduceMotion: Bool) {
+        renderingTestPolicy = TavernEffectsTestPolicy(visible: visible, reduceMotion: reduceMotion)
+        TavernEffectsClock.shared.remove(self)
+        setEffectsMotionAllowed(visible && !reduceMotion)
+    }
+
+    func advanceRenderingTestTime(by delta: TimeInterval) {
+        guard renderingTestPolicy?.motionAllowed == true else { return }
+        advanceEffects(by: delta)
+    }
+#endif
     override var isFlipped: Bool { true }
     override var isOpaque: Bool { false }
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
@@ -335,23 +420,46 @@ final class TavernRuneParticlesView: NSView, TavernEffectsClockClient {
     required init?(coder: NSCoder) { fatalError("TavernRuneParticlesView requires init(frame:)") }
     func pulse() {
         precondition(Thread.isMainThread)
-        guard effectsVisible && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { return }
+        guard effectsVisible && !effectsReduceMotion else { return }
         pulseStart = time
         render()
     }
     override func layout() { super.layout(); render(); TavernEffectsClock.shared.refresh() }
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        if window == nil { TavernEffectsClock.shared.remove(self) }
-        else { TavernEffectsClock.shared.add(self) }
+        if window == nil {
+            setEffectsMotionAllowed(false)
+            TavernEffectsClock.shared.remove(self)
+        } else { TavernEffectsClock.shared.add(self) }
     }
     override func viewDidMoveToSuperview() { super.viewDidMoveToSuperview(); TavernEffectsClock.shared.refresh() }
     override func viewDidHide() { super.viewDidHide(); TavernEffectsClock.shared.refresh() }
     override func viewDidUnhide() { super.viewDidUnhide(); TavernEffectsClock.shared.refresh() }
     deinit { TavernEffectsClock.shared.remove(self) }
-    fileprivate var effectsVisible: Bool { TavernEffectsClock.visible(self) }
-    fileprivate var effectsAnimating: Bool { true }
-    fileprivate func setEffectsMotionAllowed(_ allowed: Bool) {
+    private var effectsReduceMotion: Bool {
+#if TAVERN_RENDER_TESTING
+        if let policy = renderingTestPolicy { return policy.reduceMotion }
+#endif
+        return NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
+    fileprivate var effectsVisible: Bool {
+#if TAVERN_RENDER_TESTING
+        if let policy = renderingTestPolicy { return policy.visible }
+#endif
+        return TavernEffectsClock.visible(self)
+    }
+    fileprivate var effectsAnimating: Bool {
+#if TAVERN_RENDER_TESTING
+        if renderingTestPolicy != nil { return false }
+#endif
+        return true
+    }
+    fileprivate func setEffectsMotionAllowed(_ requested: Bool) {
+#if TAVERN_RENDER_TESTING
+        let allowed = renderingTestPolicy?.motionAllowed ?? requested
+#else
+        let allowed = requested
+#endif
         guard allowed != motionAllowed else { return }
         motionAllowed = allowed
         if !allowed { pulseStart = nil }
@@ -395,21 +503,39 @@ private func setGlow(_ layer: CALayer, center: CGPoint, radius: CGFloat, alpha: 
 private final class TavernMoteLayers {
     let soft = CALayer()
     private let core = CALayer()
+    private var lastPoint: CGPoint?
+    private var lastSize: CGFloat?
+    private var lastOpacity: Float = 0
     func attach(to parent: CALayer, core image: CGImage) {
         core.contents = image
         soft.compositingFilter = "screenBlendMode"
         core.compositingFilter = "screenBlendMode"
         soft.opacity = 0; core.opacity = 0
+        lastOpacity = 0
+        lastPoint = nil; lastSize = nil
         parent.addSublayer(soft); parent.addSublayer(core)
     }
     func update(point: CGPoint, size: CGFloat, alpha: Double) {
-        soft.position = point; core.position = point
-        soft.bounds = CGRect(x: 0, y: 0, width: size * 8, height: size * 8)
-        core.bounds = CGRect(x: 0, y: 0, width: size * 2, height: size * 2)
+        if lastPoint != point {
+            soft.position = point; core.position = point
+            lastPoint = point
+        }
+        if lastSize != size {
+            soft.bounds = CGRect(x: 0, y: 0, width: size * 8, height: size * 8)
+            core.bounds = CGRect(x: 0, y: 0, width: size * 2, height: size * 2)
+            lastSize = size
+        }
         let opacity = Float(max(0, min(1, alpha)))
-        soft.opacity = opacity; core.opacity = opacity
+        if lastOpacity != opacity {
+            soft.opacity = opacity; core.opacity = opacity
+            lastOpacity = opacity
+        }
     }
-    func hide() { soft.opacity = 0; core.opacity = 0 }
+    func hide() {
+        guard lastOpacity != 0 else { return }
+        soft.opacity = 0; core.opacity = 0
+        lastOpacity = 0
+    }
 }
 
 private final class TavernTalismanResources {
@@ -551,7 +677,7 @@ private final class TavernEffectsClock {
         guard let window = view.window else { return false }
         return !NSApp.isHidden && window.isVisible && !window.isMiniaturized
             && window.occlusionState.contains(.visible) && !view.isHiddenOrHasHiddenAncestor
-            && !view.visibleRect.isEmpty
+            && view.bounds.intersects(view.visibleRect)
     }
     func add(_ client: TavernEffectsClockClient) {
         entries.removeAll { $0.client == nil || $0.client === client }

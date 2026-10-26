@@ -477,22 +477,27 @@ fn receive(stream: &UnixStream, shared: &Shared) -> Result<(), String> {
         match message {
             ServerMessage::EndpointControl { kind,data } if kind==ENDPOINT_SNAPSHOT_KIND => {
                 let mut value:Value = serde_json::from_str(&data).map_err(|_| text("Invalid shell.snapshot.v1", "Некорректный shell.snapshot.v1"))?;
-                let snapshot = ClientShellSnapshot::deserialize(&value).map_err(|_| text("Invalid shell.snapshot.v1", "Некорректный shell.snapshot.v1"))?;
-                value["command_prefixes"] = command_prefixes.project(snapshot.server_keybindings_toml.as_deref())?;
-                if snapshot.boot_id.is_empty() { return Err(text("Empty snapshot boot_id", "Пустой snapshot boot_id").into()); }
+                drop(data);
+                let (boot_id, revision, prefixes) = {
+                    let snapshot = ClientShellSnapshot::deserialize(&value).map_err(|_| text("Invalid shell.snapshot.v1", "Некорректный shell.snapshot.v1"))?;
+                    let prefixes = command_prefixes.project(snapshot.server_keybindings_toml.as_deref())?;
+                    if snapshot.boot_id.is_empty() { return Err(text("Empty snapshot boot_id", "Пустой snapshot boot_id").into()); }
+                    (snapshot.boot_id, snapshot.revision, prefixes)
+                };
+                value["command_prefixes"] = prefixes;
                 let mut s = lock(&shared.state);
-                if let Some((boot,revision)) = &s.snapshot {
-                    if boot!=&snapshot.boot_id || snapshot.revision<*revision { return Err(text("Snapshot changed boot_id or rolled back revision", "Snapshot сменил boot_id или откатил revision").into()); }
+                if let Some((boot,previous_revision)) = &s.snapshot {
+                    if boot!=&boot_id || revision<*previous_revision { return Err(text("Snapshot changed boot_id or rolled back revision", "Snapshot сменил boot_id или откатил revision").into()); }
                 }
-                s.snapshot = Some((snapshot.boot_id.clone(),snapshot.revision));
+                s.snapshot = Some((boot_id.clone(),revision));
                 drop(s);
                 shared.push(TavernEvent::metadata(event::SNAPSHOT,value))?;
-                while let Some((boot,revision,e)) = future.pop_front() {
-                    if boot!=snapshot.boot_id { return Err(text("Queued frame does not match the snapshot", "Ожидающий кадр не соответствует snapshot").into()); }
+                while let Some((boot,frame_revision,e)) = future.pop_front() {
+                    if boot!=boot_id { return Err(text("Queued frame does not match the snapshot", "Ожидающий кадр не соответствует snapshot").into()); }
                     // Control может обогнать render: старый кадр того же boot
                     // теряет актуальность, но не делает соединение неисправным.
-                    if revision<snapshot.revision { continue; }
-                    if revision>snapshot.revision { future.push_front((boot,revision,e)); break; }
+                    if frame_revision<revision { continue; }
+                    if frame_revision>revision { future.push_front((boot,frame_revision,e)); break; }
                     shared.push(e)?;
                 }
             }

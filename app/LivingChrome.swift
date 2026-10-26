@@ -1,6 +1,27 @@
 import AppKit
 import QuartzCore
 
+struct TavernWoodLightmapKey: Hashable {
+    let panelX: CGFloat
+    let panelY: CGFloat
+    let panelWidth: CGFloat
+    let panelHeight: CGFloat
+    let regionX: CGFloat
+    let regionY: CGFloat
+    let regionWidth: CGFloat
+    let regionHeight: CGFloat
+    let lampX: CGFloat
+    let lampY: CGFloat
+
+    init(panel: CGRect, region: CGRect, lamp: CGPoint) {
+        panelX = panel.origin.x; panelY = panel.origin.y
+        panelWidth = panel.size.width; panelHeight = panel.size.height
+        regionX = region.origin.x; regionY = region.origin.y
+        regionWidth = region.size.width; regionHeight = region.size.height
+        lampX = lamp.x; lampY = lamp.y
+    }
+}
+
 // Декор — отдельный от SurfaceView слой. Его часы меняют только CALayer,
 // поэтому огонь и руны не инвалидируют ни терминал, ни текст кнопок.
 final class LivingChromeView: NSView {
@@ -50,7 +71,7 @@ final class LivingChromeView: NSView {
     private var glowRect = CGRect.zero
     private var lastFlameIndex = -1
     private var layersPrepared = false
-    private var litMaterialBounds = CGRect.null
+    private var litMaterialKey: TavernWoodLightmapKey?
     private var frameArtwork: NSImage?
     private var frameArtworkRect = NSRect.zero
     private var chromeLayoutBounds = CGRect.null
@@ -243,10 +264,11 @@ final class LivingChromeView: NSView {
             lastFlameIndex = -1
             glowRect = CGRect(x: aperture.midX - 72, y: aperture.midY - 72, width: 144, height: 144)
             illumination.frame = glowRect
-            if suspensionVisible == true && litMaterialBounds != bounds {
-                illumination.contents = Self.woodLightmap(panel: bounds, region: glowRect,
-                                                        lamp: CGPoint(x: aperture.midX, y: aperture.midY))
-                litMaterialBounds = bounds
+            let lamp = CGPoint(x: aperture.midX, y: aperture.midY)
+            let lightmapKey = TavernWoodLightmapKey(panel: bounds, region: glowRect, lamp: lamp)
+            if suspensionVisible == true && litMaterialKey != lightmapKey {
+                illumination.contents = Self.woodLightmap(panel: bounds, region: glowRect, lamp: lamp)
+                litMaterialKey = lightmapKey
             }
         case .root:
             let corners = rootCorners
@@ -423,35 +445,67 @@ final class LivingChromeView: NSView {
     // Декодированное дерево общее для окон. Lightmap повторяет тот же native-size
     // crop, что drawWood: цвет волокон становится albedo, перепады — normal map.
     private final class WoodSamples {
-        let context: CGContext
         let width: Int
         let height: Int
         let pointSize: NSSize
-        let pixels: UnsafeMutablePointer<UInt8>
+        let albedo: [Double]
+        let nx: [Double]
+        let ny: [Double]
+        let normalLength: [Double]
 
         init() {
             let wood = try! TavernMaterials.bundled.get().wood
             let image = wood.cgImage(forProposedRect: nil, context: nil, hints: TavernMaterials.frameHints)!
-            width = image.width
-            height = image.height
+            let width = image.width, height = image.height
+            self.width = width; self.height = height
             pointSize = wood.size
-            let bitmap = CGContext(data: nil, width: image.width, height: image.height, bitsPerComponent: 8,
-                                   bytesPerRow: image.width * 4, space: CGColorSpaceCreateDeviceRGB(),
+            let bitmap = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
+                                   bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
                                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue)!
-            bitmap.draw(image, in: CGRect(x: 0, y: 0, width: CGFloat(image.width), height: CGFloat(image.height)))
-            context = bitmap
-            pixels = bitmap.data!.assumingMemoryBound(to: UInt8.self)
-        }
-
-        func luminance(x: Int, y: Int) -> Double {
-            let offset = (min(height - 1, max(0, y)) * width + min(width - 1, max(0, x))) * 4
-            return (Double(pixels[offset]) * 0.2126 + Double(pixels[offset + 1]) * 0.7152
-                    + Double(pixels[offset + 2]) * 0.0722) / 255
+            bitmap.draw(image, in: CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height)))
+            let pixels = bitmap.data!.assumingMemoryBound(to: UInt8.self)
+            func luminance(x: Int, y: Int) -> Double {
+                let offset = (min(height - 1, max(0, y)) * width + min(width - 1, max(0, x))) * 4
+                return (Double(pixels[offset]) * 0.2126 + Double(pixels[offset + 1]) * 0.7152
+                        + Double(pixels[offset + 2]) * 0.0722) / 255
+            }
+            var albedo = [Double](repeating: 0, count: width * height)
+            var nx = [Double](repeating: 0, count: width * height)
+            var ny = [Double](repeating: 0, count: width * height)
+            var normalLength = [Double](repeating: 0, count: width * height)
+            for y in 0..<height {
+                for x in 0..<width {
+                    let index = y * width + x
+                    albedo[index] = luminance(x: x, y: y)
+                    let normalX = (luminance(x: x - 2, y: y) - luminance(x: x + 2, y: y)) * 4
+                    let normalY = (luminance(x: x, y: y + 2) - luminance(x: x, y: y - 2)) * 4
+                    nx[index] = normalX; ny[index] = normalY
+                    normalLength[index] = sqrt(normalX * normalX + normalY * normalY + 1)
+                }
+            }
+            self.albedo = albedo; self.nx = nx; self.ny = ny; self.normalLength = normalLength
         }
     }
     private static let woodSamples = WoodSamples()
 
+    private final class LightmapCacheKey: NSObject {
+        let value: TavernWoodLightmapKey
+        init(_ value: TavernWoodLightmapKey) { self.value = value }
+        override var hash: Int { value.hashValue }
+        override func isEqual(_ object: Any?) -> Bool {
+            (object as? LightmapCacheKey)?.value == value
+        }
+    }
+    private static let lightmapCache: NSCache<LightmapCacheKey, CGImage> = {
+        let cache = NSCache<LightmapCacheKey, CGImage>()
+        cache.countLimit = 8
+        cache.totalCostLimit = 4 * 1024 * 1024
+        return cache
+    }()
+
     private static func woodLightmap(panel: CGRect, region: CGRect, lamp: CGPoint) -> CGImage {
+        let cacheKey = LightmapCacheKey(TavernWoodLightmapKey(panel: panel, region: region, lamp: lamp))
+        if let image = lightmapCache.object(forKey: cacheKey) { return image }
         let wood = woodSamples
         let resolution: CGFloat = 2
         let width = Int(ceil(region.width * resolution))
@@ -477,12 +531,11 @@ final class LivingChromeView: NSView {
                 let distanceSquared = dx * dx + dy * dy
                 guard distanceSquared < radiusSquared else { continue }
                 let sourceX = max(0, min(wood.width - 1, Int((worldX - panel.minX) * CGFloat(wood.width) / wood.pointSize.width)))
-                let albedo = wood.luminance(x: sourceX, y: sourceY)
-                let nx = (wood.luminance(x: sourceX - 2, y: sourceY)
-                          - wood.luminance(x: sourceX + 2, y: sourceY)) * 4
-                let ny = (wood.luminance(x: sourceX, y: sourceY + 2)
-                          - wood.luminance(x: sourceX, y: sourceY - 2)) * 4
-                let normalLength = sqrt(nx * nx + ny * ny + 1)
+                let sourceIndex = sourceY * wood.width + sourceX
+                let albedo = wood.albedo[sourceIndex]
+                let nx = wood.nx[sourceIndex]
+                let ny = wood.ny[sourceIndex]
+                let normalLength = wood.normalLength[sourceIndex]
                 let rayLength = sqrt(distanceSquared + lampHeight * lampHeight)
                 let diffuse = max(0, (nx * dx + ny * dy + lampHeight) / (normalLength * rayLength))
                 let attenuation = 1 - distanceSquared / radiusSquared
@@ -496,7 +549,12 @@ final class LivingChromeView: NSView {
                 pixels[offset + 3] = UInt8(alpha * 255)
             }
         }
-        return context.makeImage()!
+        let image = context.makeImage()!
+        let cost = image.bytesPerRow * image.height
+        if cost <= lightmapCache.totalCostLimit {
+            lightmapCache.setObject(image, forKey: cacheKey, cost: cost)
+        }
+        return image
     }
 
     private static let blueHalo = halo(red: 0.12, green: 0.58, blue: 1, strength: 0.5)

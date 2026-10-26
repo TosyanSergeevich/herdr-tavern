@@ -76,14 +76,68 @@ private enum TavernSoundError: LocalizedError {
     }
 }
 
+struct TavernSoundResource: Equatable {
+    let url: URL
+    let revision: UInt64
+}
+
+// All filesystem work, including playback reads, shares one serial worker.
+private enum TavernSoundIO {
+    static let queue = DispatchQueue(label: "org.herdr.tavern.sound-io", qos: .userInitiated)
+
+    static func regularData(at url: URL) throws -> Data {
+        let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+        guard attributes[.type] as? FileAttributeType == .typeRegular else {
+            throw CocoaError(.fileReadUnsupportedScheme)
+        }
+        return try Data(contentsOf: url)
+    }
+
+    static func checkDirectory(_ directory: URL) throws {
+        let attributes = try FileManager.default.attributesOfItem(atPath: directory.path)
+        guard attributes[.type] as? FileAttributeType == .typeDirectory else {
+            throw CocoaError(.fileWriteInvalidFileName)
+        }
+    }
+
+    static func remove(_ url: URL?, directory: URL) throws {
+        guard let url else { return }
+        let manager = FileManager.default
+        let attributes: [FileAttributeKey: Any]
+        do {
+            try checkDirectory(directory)
+            attributes = try manager.attributesOfItem(atPath: url.path)
+        } catch let error as NSError where error.domain == NSCocoaErrorDomain
+            && (error.code == NSFileReadNoSuchFileError || error.code == NSFileNoSuchFileError) {
+            return
+        } catch {
+            throw TavernSoundError.fileOperation("settings.sound.inspectFailed", error)
+        }
+        // Never remove a symlink or directory, even if defaults contain its name.
+        guard attributes[.type] as? FileAttributeType == .typeRegular else { return }
+        do {
+            try manager.removeItem(at: url)
+        } catch {
+            throw TavernSoundError.fileOperation("settings.sound.removeFailed", error)
+        }
+    }
+}
+
 final class TavernSoundSettings {
     private static let keyPrefix = "HerdrTavern.sounds.v1."
     private let defaults: UserDefaults
     private let soundDirectory: URL
+    private let bundledURLs: [TavernSoundEvent: URL]
     private var choices: [TavernSoundEvent: TavernSoundChoice] = [:]
+    private var revisions: [TavernSoundEvent: UInt64] = [:]
+    private var mutations: [() -> Void] = []
+    private var mutating = false
     private var masterEnabled: Bool
     private var masterVolume: Double
     var onChange: (() -> Void)?
+    #if TAVERN_RENDER_TESTING
+    var ioGate: (() -> Void)?
+    #endif
 
     init(defaults: UserDefaults = .standard, soundDirectory: URL? = nil) {
         self.defaults = defaults
@@ -91,6 +145,12 @@ final class TavernSoundSettings {
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("HerdrTavern", isDirectory: true)
             .appendingPathComponent("Sounds", isDirectory: true)
+        var bundled: [TavernSoundEvent: URL] = [:]
+        for event in TavernSoundEvent.allCases {
+            bundled[event] = Bundle.main.url(forResource: event.defaultFilename,
+                                            withExtension: nil, subdirectory: "Sounds")
+        }
+        bundledURLs = bundled
         masterEnabled = defaults.object(forKey: Self.keyPrefix + "enabled") as? Bool ?? true
         masterVolume = Self.normalizedVolume(
             (defaults.object(forKey: Self.keyPrefix + "volume") as? NSNumber)?.doubleValue ?? 0.5,
@@ -127,9 +187,7 @@ final class TavernSoundSettings {
         }
     }
 
-    func choice(for event: TavernSoundEvent) -> TavernSoundChoice {
-        choices[event]!
-    }
+    func choice(for event: TavernSoundEvent) -> TavernSoundChoice { choices[event]! }
 
     func setEnabled(_ value: Bool, for event: TavernSoundEvent) {
         var choice = choice(for: event)
@@ -152,68 +210,168 @@ final class TavernSoundSettings {
         return choice.customDisplayName ?? filename
     }
 
-    func soundURL(for event: TavernSoundEvent) -> URL? {
-        guard let filename = choice(for: event).customFilename else {
-            return Bundle.main.url(forResource: event.defaultFilename, withExtension: nil,
-                                   subdirectory: "Sounds")
+    func resource(for event: TavernSoundEvent) -> TavernSoundResource? {
+        let url: URL?
+        if let filename = choice(for: event).customFilename {
+            url = managedURL(for: filename)
+        } else {
+            url = bundledURLs[event]
         }
-        // Повреждённая пользовательская настройка не подменяется звуком по умолчанию.
-        guard let url = managedURL(for: filename),
-              let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
-              attributes[.type] as? FileAttributeType == .typeRegular else { return nil }
-        return url
+        return url.map { TavernSoundResource(url: $0, revision: revisions[event, default: 0]) }
     }
 
-    func replaceSound(for event: TavernSoundEvent, with url: URL) throws {
+    fileprivate func performIO<T>(_ work: @escaping () throws -> T,
+                                  completion: @escaping (Result<T, Error>) -> Void) {
+        #if TAVERN_RENDER_TESTING
+        let gate = ioGate
+        #endif
+        TavernSoundIO.queue.async {
+            #if TAVERN_RENDER_TESTING
+            gate?()
+            #endif
+            let result = Result { try work() }
+            DispatchQueue.main.async { completion(result) }
+        }
+    }
+
+    fileprivate func read(_ resource: TavernSoundResource,
+                          completion: @escaping (Result<Data, Error>) -> Void) {
+        let directory = soundDirectory
+        let managed = resource.url.deletingLastPathComponent().path == directory.path
+        performIO({
+            if managed { try TavernSoundIO.checkDirectory(directory) }
+            return try TavernSoundIO.regularData(at: resource.url)
+        }, completion: completion)
+    }
+
+    func replaceSound(for event: TavernSoundEvent, with url: URL,
+                      completion: @escaping (Result<Void, Error>) -> Void) {
+        enqueueMutation { self.beginReplace(for: event, with: url, completion: completion) }
+    }
+
+    private func beginReplace(for event: TavernSoundEvent, with url: URL,
+                              completion: @escaping (Result<Void, Error>) -> Void) {
         let scoped = url.startAccessingSecurityScopedResource()
-        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-        let source = url.resolvingSymlinksInPath()
-        guard url.isFileURL, NSSound(contentsOf: source, byReference: false) != nil else {
-            throw TavernSoundError.unsupported(url.lastPathComponent)
-        }
-        let manager = FileManager.default
-        do {
-            try manager.createDirectory(at: soundDirectory, withIntermediateDirectories: true)
-        } catch {
-            throw TavernSoundError.fileOperation("settings.sound.createDirectoryFailed", error)
-        }
+        let directory = soundDirectory
+        let oldURL = removableURL(for: event)
         let suffix = url.pathExtension.lowercased()
         let validSuffix = !suffix.isEmpty && suffix.count <= 12
             && suffix.utf8.allSatisfy { (97...122).contains($0) || (48...57).contains($0) }
         let filename = "tavern-sound-\(UUID().uuidString).\(validSuffix ? suffix : "audio")"
-        let destination = soundDirectory.appendingPathComponent(filename)
-        do {
-            do {
-                try manager.copyItem(at: source, to: destination)
-            } catch {
-                throw TavernSoundError.fileOperation("settings.sound.copyFailed", error)
-            }
-            guard NSSound(contentsOf: destination, byReference: false) != nil else {
-                throw TavernSoundError.unsupported(url.lastPathComponent)
-            }
-            try removeManagedSound(choice(for: event).customFilename, excluding: event)
-        } catch {
-            // До успешного удаления прежней копии настройка остаётся прежней.
-            do {
-                try removeManagedSound(filename, excluding: event)
-            } catch let cleanup {
-                throw TavernSoundError.cleanup(error, cleanup)
-            }
-            throw error
+        let destination = directory.appendingPathComponent(filename, isDirectory: false)
+        let finish: (Result<Void, Error>) -> Void = { result in
+            if scoped { url.stopAccessingSecurityScopedResource() }
+            self.finishMutation(result, completion: completion)
         }
-        var choice = choice(for: event)
-        choice.customFilename = filename
-        choice.customDisplayName = url.lastPathComponent
-        save(choice, for: event)
+        performIO({
+            guard url.isFileURL else { throw TavernSoundError.unsupported(url.lastPathComponent) }
+            let source = url.resolvingSymlinksInPath()
+            return (source, try TavernSoundIO.regularData(at: source))
+        }) { result in
+            switch result {
+            case .failure(let error): finish(.failure(error))
+            case .success(let (source, data)):
+                guard NSSound(data: data) != nil else {
+                    finish(.failure(TavernSoundError.unsupported(url.lastPathComponent)))
+                    return
+                }
+                self.performIO({
+                    do {
+                        try FileManager.default.createDirectory(at: directory,
+                                                                withIntermediateDirectories: true)
+                        try TavernSoundIO.checkDirectory(directory)
+                    } catch {
+                        throw TavernSoundError.fileOperation("settings.sound.createDirectoryFailed", error)
+                    }
+                    do {
+                        try FileManager.default.copyItem(at: source, to: destination)
+                    } catch {
+                        throw TavernSoundError.fileOperation("settings.sound.copyFailed", error)
+                    }
+                    return try TavernSoundIO.regularData(at: destination)
+                }) { copied in
+                    switch copied {
+                    case .failure(let error):
+                        self.rollback(destination, original: error, finish: finish)
+                    case .success(let copiedData):
+                        guard NSSound(data: copiedData) != nil else {
+                            self.rollback(destination,
+                                          original: TavernSoundError.unsupported(url.lastPathComponent),
+                                          finish: finish)
+                            return
+                        }
+                        self.performIO({
+                            try TavernSoundIO.remove(oldURL, directory: directory)
+                        }) { removed in
+                            switch removed {
+                            case .failure(let error):
+                                self.rollback(destination, original: error, finish: finish)
+                            case .success:
+                                var choice = self.choice(for: event)
+                                choice.customFilename = filename
+                                choice.customDisplayName = url.lastPathComponent
+                                self.revisions[event, default: 0] &+= 1
+                                self.save(choice, for: event)
+                                finish(.success(()))
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
-    func resetSound(for event: TavernSoundEvent) throws {
-        var choice = choice(for: event)
-        guard choice.customFilename != nil || choice.customDisplayName != nil else { return }
-        try removeManagedSound(choice.customFilename, excluding: event)
-        choice.customFilename = nil
-        choice.customDisplayName = nil
-        save(choice, for: event)
+    private func rollback(_ destination: URL, original: Error,
+                          finish: @escaping (Result<Void, Error>) -> Void) {
+        let directory = soundDirectory
+        performIO({ try TavernSoundIO.remove(destination, directory: directory) }) { cleanup in
+            switch cleanup {
+            case .success: finish(.failure(original))
+            case .failure(let error): finish(.failure(TavernSoundError.cleanup(original, error)))
+            }
+        }
+    }
+
+    func resetSound(for event: TavernSoundEvent,
+                    completion: @escaping (Result<Void, Error>) -> Void) {
+        enqueueMutation {
+            let previous = self.choice(for: event)
+            guard previous.customFilename != nil || previous.customDisplayName != nil else {
+                self.finishMutation(.success(()), completion: completion)
+                return
+            }
+            let oldURL = self.removableURL(for: event)
+            let directory = self.soundDirectory
+            self.performIO({ try TavernSoundIO.remove(oldURL, directory: directory) }) { result in
+                if case .success = result {
+                    var choice = self.choice(for: event)
+                    choice.customFilename = nil
+                    choice.customDisplayName = nil
+                    if previous.customFilename != nil { self.revisions[event, default: 0] &+= 1 }
+                    self.save(choice, for: event)
+                }
+                self.finishMutation(result, completion: completion)
+            }
+        }
+    }
+
+    private func enqueueMutation(_ operation: @escaping () -> Void) {
+        mutations.append(operation)
+        startNextMutation()
+    }
+
+    private func startNextMutation() {
+        guard !mutating, !mutations.isEmpty else { return }
+        mutating = true
+        mutations.removeFirst()()
+    }
+
+    private func finishMutation(_ result: Result<Void, Error>,
+                                completion: (Result<Void, Error>) -> Void) {
+        // Remain busy during completion: a reentrant caller joins the same FIFO.
+        completion(result)
+        mutating = false
+        startNextMutation()
     }
 
     private static func normalizedVolume(_ value: Double, fallback: Double) -> Double {
@@ -230,7 +388,6 @@ final class TavernSoundSettings {
     }
 
     private func managedURL(for filename: String) -> URL? {
-        // Из defaults принимаются только имена нашего генератора, не внешние пути.
         let prefix = "tavern-sound-"
         guard filename.hasPrefix(prefix) else { return nil }
         let pieces = filename.dropFirst(prefix.count).split(separator: ".", omittingEmptySubsequences: false)
@@ -239,86 +396,226 @@ final class TavernSoundSettings {
               pieces[1].utf8.allSatisfy({ (97...122).contains($0) || (48...57).contains($0) }) else {
             return nil
         }
-        return soundDirectory.appendingPathComponent(filename)
+        return soundDirectory.appendingPathComponent(filename, isDirectory: false)
     }
 
-    private func removeManagedSound(_ filename: String?, excluding event: TavernSoundEvent) throws {
-        guard let filename, let url = managedURL(for: filename),
-              !choices.contains(where: { $0.key != event && $0.value.customFilename == filename }) else { return }
-        let manager = FileManager.default
-        let attributes: [FileAttributeKey: Any]
-        do {
-            attributes = try manager.attributesOfItem(atPath: url.path)
-        } catch let error as NSError where error.domain == NSCocoaErrorDomain
-            && (error.code == NSFileReadNoSuchFileError || error.code == NSFileNoSuchFileError) {
-            return
-        } catch {
-            throw TavernSoundError.fileOperation("settings.sound.inspectFailed", error)
+    private func removableURL(for event: TavernSoundEvent) -> URL? {
+        guard let filename = choice(for: event).customFilename,
+              !choices.contains(where: { $0.key != event && $0.value.customFilename == filename }) else {
+            return nil
         }
-        // Не следуем символьным ссылкам и не удаляем каталоги даже с подходящим именем.
-        guard attributes[.type] as? FileAttributeType == .typeRegular else { return }
-        do {
-            try manager.removeItem(at: url)
-        } catch {
-            throw TavernSoundError.fileOperation("settings.sound.removeFailed", error)
-        }
+        return managedURL(for: filename)
     }
 }
 
 final class TavernSoundPlayer: NSObject, NSSoundDelegate {
+    private final class PreparedSound {
+        let data: Data
+        let template: NSSound
+        init(data: Data, template: NSSound) { self.data = data; self.template = template }
+    }
+
+    private struct Intent {
+        let token: UInt64
+        let event: TavernSoundEvent
+        let resource: TavernSoundResource
+        let preview: Bool
+    }
+
+    private struct Load {
+        let resource: TavernSoundResource
+        var completion: (Result<PreparedSound, Error>) -> Void
+    }
+
     private let settings: TavernSoundSettings
+    private let cache = NSCache<NSString, PreparedSound>()
+    private let cacheBudget = 32 * 1024 * 1024
+    private var resources: [TavernSoundEvent: TavernSoundResource] = [:]
+    private var loading: Load?
+    private var pendingLoad: Load?
+    private var warmResource: TavernSoundResource?
+    private var intent: Intent?
+    private var generation: UInt64 = 0
     private var activeSound: NSSound?
     private var activeEvent: TavernSoundEvent?
-    private var activeURL: URL?
+    private var activeResource: TavernSoundResource?
     private var activePreview = false
+    private var pressureObserver: NSObjectProtocol?
     var onError: ((String) -> Void)?
+    #if TAVERN_RENDER_TESTING
+    var playSound: ((NSSound) -> Bool)?
+    var isSoundPlaying: ((NSSound) -> Bool)?
+    var testingActiveSound: NSSound? { activeSound }
+    func testingTemplate(for resource: TavernSoundResource) -> NSSound? {
+        cache.object(forKey: "\(resource.revision):\(resource.url.absoluteString)" as NSString)?.template
+    }
+    #endif
 
     init(settings: TavernSoundSettings) {
         self.settings = settings
         super.init()
+        cache.countLimit = 8
+        cache.totalCostLimit = cacheBudget
+        captureResources()
+        pressureObserver = NotificationCenter.default.addObserver(
+            forName: .tavernMemoryPressure, object: nil, queue: .main) { [weak self] _ in
+                self?.cache.removeAllObjects()
+            }
+        // The player is created at interface startup, not while collecting settings.
+        if settings.enabled, settings.choice(for: .interfaceClick).enabled,
+           settings.choice(for: .interfaceClick).customFilename == nil,
+           let resource = settings.resource(for: .interfaceClick) {
+            warmResource = resource
+            load(resource) { [weak self] _ in self?.warmResource = nil }
+        }
+    }
+
+    deinit {
+        if let pressureObserver { NotificationCenter.default.removeObserver(pressureObserver) }
+    }
+
+    private func captureResources() {
+        resources.removeAll(keepingCapacity: true)
+        for event in TavernSoundEvent.allCases { resources[event] = settings.resource(for: event) }
+    }
+
+    private func wanted(_ resource: TavernSoundResource) -> Bool {
+        let currentIntent = intent.map {
+            $0.resource == resource && settings.resource(for: $0.event) == resource
+                && settings.enabled && ($0.preview || settings.choice(for: $0.event).enabled)
+        } ?? false
+        let warming = warmResource == resource && settings.enabled
+            && settings.choice(for: .interfaceClick).enabled
+            && settings.choice(for: .interfaceClick).customFilename == nil
+            && settings.resource(for: .interfaceClick) == resource
+        return currentIntent || warming
+    }
+
+    private func load(_ resource: TavernSoundResource,
+                      completion: @escaping (Result<PreparedSound, Error>) -> Void) {
+        guard wanted(resource) else { return }
+        let key = "\(resource.revision):\(resource.url.absoluteString)" as NSString
+        if let prepared = cache.object(forKey: key) {
+            completion(.success(prepared))
+            return
+        }
+        if loading?.resource == resource {
+            loading?.completion = completion
+            return
+        }
+        if loading != nil {
+            pendingLoad = Load(resource: resource, completion: completion)
+            return
+        }
+        loading = Load(resource: resource, completion: completion)
+        settings.read(resource) { [weak self] result in
+            guard let self else { return }
+            let callback = self.loading?.completion
+            self.loading = nil
+            // Obsolete data must not even construct an AppKit template.
+            if self.wanted(resource) {
+                let prepared: Result<PreparedSound, Error> = result.flatMap { data in
+                    guard let template = NSSound(data: data) else {
+                        return .failure(TavernSoundError.unsupported(resource.url.lastPathComponent))
+                    }
+                    return .success(PreparedSound(data: data, template: template))
+                }
+                if self.wanted(resource) {
+                    if case .success(let sound) = prepared, sound.data.count <= self.cacheBudget {
+                        self.cache.setObject(sound, forKey: key, cost: sound.data.count)
+                    }
+                    callback?(prepared)
+                }
+            }
+            if let next = self.pendingLoad {
+                self.pendingLoad = nil
+                guard self.wanted(next.resource) else { return }
+                self.load(next.resource, completion: next.completion)
+            }
+        }
     }
 
     func play(_ event: TavernSoundEvent, preview: Bool = false) {
         guard settings.enabled else { stop(); return }
         let choice = settings.choice(for: event)
         guard preview || choice.enabled else { return }
-        if event != .interfaceClick, activeEvent == event, activeSound?.isPlaying == true { return }
+        if event != .interfaceClick, activeEvent == event, let sound = activeSound {
+            #if TAVERN_RENDER_TESTING
+            if isSoundPlaying?(sound) ?? sound.isPlaying { return }
+            #else
+            if sound.isPlaying { return }
+            #endif
+        }
         stop()
-        guard let url = settings.soundURL(for: event) else {
+        guard let resource = settings.resource(for: event) else {
             onError?(L("settings.sound.unavailable", event.title, settings.displayName(for: event)))
             return
         }
-        guard let sound = NSSound(contentsOf: url, byReference: false) else {
-            onError?(L("settings.sound.readFailed", event.title, settings.displayName(for: event)))
-            return
-        }
-        sound.volume = Float(settings.volume * choice.volume)
-        sound.delegate = self
-        activeSound = sound
-        activeEvent = event
-        activeURL = url
-        activePreview = preview
-        if !sound.play() {
-            stop()
-            onError?(L("settings.sound.playFailed", event.title))
+        let request = Intent(token: generation, event: event, resource: resource, preview: preview)
+        intent = request
+        load(resource) { [weak self] result in
+            guard let self, self.intent?.token == request.token,
+                  self.wanted(resource) else { return }
+            switch result {
+            case .failure:
+                self.intent = nil
+                self.onError?(L("settings.sound.readFailed", event.title, self.settings.displayName(for: event)))
+            case .success(let prepared):
+                let copied = prepared.template.copy() as? NSSound
+                guard let sound = (copied !== prepared.template ? copied : nil)
+                    ?? NSSound(data: prepared.data) else {
+                    self.intent = nil
+                    self.onError?(L("settings.sound.readFailed", event.title, self.settings.displayName(for: event)))
+                    return
+                }
+                sound.volume = Float(self.settings.volume * self.settings.choice(for: event).volume)
+                sound.delegate = self
+                self.activeSound = sound
+                self.activeEvent = event
+                self.activeResource = resource
+                self.activePreview = preview
+                #if TAVERN_RENDER_TESTING
+                let played = self.playSound?(sound) ?? sound.play()
+                #else
+                let played = sound.play()
+                #endif
+                if !played {
+                    self.stop()
+                    self.onError?(L("settings.sound.playFailed", event.title))
+                }
+            }
         }
     }
 
     func stop() {
+        generation &+= 1
+        intent = nil
+        warmResource = nil
+        pendingLoad = nil
         let sound = activeSound
         activeSound = nil
         activeEvent = nil
-        activeURL = nil
+        activeResource = nil
         activePreview = false
         sound?.delegate = nil
         sound?.stop()
     }
 
     func settingsDidChange() {
+        let oldResources = resources
+        captureResources()
+        if oldResources != resources { cache.removeAllObjects() }
         guard settings.enabled else { stop(); return }
+        if let request = intent {
+            guard settings.resource(for: request.event) == request.resource,
+                  request.preview || settings.choice(for: request.event).enabled else {
+                stop()
+                return
+            }
+        }
         guard let event = activeEvent, let sound = activeSound else { return }
         let choice = settings.choice(for: event)
-        guard (activePreview || choice.enabled), settings.soundURL(for: event) == activeURL else {
+        guard (activePreview || choice.enabled), settings.resource(for: event) == activeResource else {
             stop()
             return
         }
@@ -326,15 +623,18 @@ final class TavernSoundPlayer: NSObject, NSSoundDelegate {
     }
 
     func sound(_ sound: NSSound, didFinishPlaying success: Bool) {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in self?.sound(sound, didFinishPlaying: success) }
+            return
+        }
         guard activeSound === sound else { return }
         let event = activeEvent
         activeSound = nil
         activeEvent = nil
-        activeURL = nil
+        activeResource = nil
         activePreview = false
+        intent = nil
         sound.delegate = nil
-        if !success, let event {
-            onError?(L("settings.sound.interrupted", event.title))
-        }
+        if !success, let event { onError?(L("settings.sound.interrupted", event.title)) }
     }
 }

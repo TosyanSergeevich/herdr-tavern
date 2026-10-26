@@ -30,7 +30,7 @@ impl TavernEvent {
     pub fn metadata(kind: u32, value: Value) -> Self {
         Self {
             kind,
-            json: value.to_string().into_bytes(),
+            json: serde_json::to_vec(&value).expect("serializing JSON Value to Vec cannot fail"),
             segments: Vec::new(),
             assets: Vec::new(),
         }

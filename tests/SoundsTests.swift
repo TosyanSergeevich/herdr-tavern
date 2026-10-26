@@ -4,7 +4,8 @@ import Foundation
     static func main() {
         newMoveDefaultsPreserveExistingPreferences()
         movePreferencesPersistIndependently()
-        print("Пройдено 2 проверки настроек звука перемещения")
+        normalizedPreferencesPersistWithoutChangingResources()
+        print("Пройдено 3 проверки настроек звука")
     }
 
     static func newMoveDefaultsPreserveExistingPreferences() {
@@ -43,6 +44,27 @@ import Foundation
             precondition(Set(defaults.persistentDomain(forName: suite)!.keys)
                          == ["HerdrTavern.sounds.v1.event.interfaceMove"],
                          "Настройка перемещения должна сохраняться отдельно от остальных звуков")
+        }
+    }
+
+    static func normalizedPreferencesPersistWithoutChangingResources() {
+        withDefaults { defaults, _ in
+            let settings = TavernSoundSettings(defaults: defaults)
+            let initial = settings.resource(for: .interfaceMove)
+            settings.volume = 2
+            settings.setVolume(-1, for: .interfaceMove)
+            settings.setEnabled(false, for: .interfaceMove)
+            precondition(settings.volume == 1)
+            precondition(settings.choice(for: .interfaceMove).volume == 0)
+            precondition(settings.resource(for: .interfaceMove) == initial,
+                         "Громкость и enabled не меняют revision источника")
+            settings.volume = .nan
+            settings.setVolume(.infinity, for: .interfaceMove)
+            let restored = TavernSoundSettings(defaults: defaults)
+            precondition(restored.volume == 0.5)
+            precondition(restored.choice(for: .interfaceMove).volume
+                         == TavernSoundEvent.interfaceMove.defaultVolume)
+            precondition(!restored.choice(for: .interfaceMove).enabled)
         }
     }
 

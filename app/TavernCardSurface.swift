@@ -10,6 +10,100 @@ enum TavernCardResourceError: LocalizedError {
     }
 }
 
+extension Notification.Name {
+    static let tavernMemoryPressure = Notification.Name("org.herdr.tavern.memory-pressure")
+}
+
+struct TavernPlankKey: Hashable {
+    let seed: UInt64
+    let construction: TavernPlankConstruction
+    let pixelWidth: Int
+    let pixelHeight: Int
+    let pointWidth: CGFloat
+    let pointHeight: CGFloat
+}
+
+struct TavernCardMaterialKey: Hashable {
+    let plank: TavernPlankKey
+    let selected: Bool
+}
+
+struct TavernCardShadowKey: Equatable {
+    let material: TavernCardMaterialKey
+    let pixelWidth: Int
+    let pixelHeight: Int
+    let geometryBits: SIMD4<UInt32>
+    let lampBits: SIMD3<UInt32>
+
+    init(material: TavernCardMaterialKey, pixelWidth: Int, pixelHeight: Int,
+         geometry: SIMD4<Float>, lamp: SIMD4<Float>) {
+        self.material = material
+        self.pixelWidth = pixelWidth
+        self.pixelHeight = pixelHeight
+        geometryBits = SIMD4(geometry.x.bitPattern, geometry.y.bitPattern,
+                             geometry.z.bitPattern, geometry.w.bitPattern)
+        lampBits = SIMD3(lamp.x.bitPattern, lamp.y.bitPattern, lamp.z.bitPattern)
+    }
+}
+
+private struct TavernCardShadow {
+    let key: TavernCardShadowKey
+    let texture: MTLTexture
+}
+
+private enum TavernCardSnapshotError: LocalizedError {
+    case unavailable
+    case gpu(String)
+    case encoder
+
+    var errorDescription: String? {
+        switch self {
+        case .unavailable: return L("core.card.snapshotUnavailable")
+        case .gpu(let message): return L("core.card.snapshotFailed", message)
+        case .encoder: return L("core.card.encoderFailed")
+        }
+    }
+}
+
+#if TAVERN_RENDER_TESTING
+struct TavernCardSnapshotInputs: Equatable {
+    let key: TavernCardMaterialKey
+    let bounds: CGRect
+    let clock: Double
+    let geometry: SIMD4<Float>
+    let lamp: SIMD4<Float>
+    let magicPosition: SIMD4<Float>
+    let magicColour: SIMD4<Float>
+}
+#endif
+
+private final class TavernCardClock {
+    static let shared = TavernCardClock()
+    private struct Entry { weak var view: TavernCardSurfaceView? }
+    private var views: [Entry] = []
+    private var timer: Timer?
+
+    func setActive(_ view: TavernCardSurfaceView, _ active: Bool) {
+        views.removeAll { $0.view == nil || $0.view === view }
+        if active { views.append(Entry(view: view)) }
+        if views.isEmpty {
+            timer?.invalidate()
+            timer = nil
+        } else if timer == nil {
+            let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
+                guard let self else { return }
+                for entry in self.views { entry.view?.clockTick() }
+                self.views.removeAll { $0.view == nil }
+                if self.views.isEmpty {
+                    self.timer?.invalidate()
+                    self.timer = nil
+                }
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            self.timer = timer
+        }
+    }
+}
 /// Decorative only: the owning native button retains hit testing, text and accessibility.
 final class TavernCardSurfaceView: NSView, MTKViewDelegate {
     var lightPositionProvider: (() -> CGPoint)? { didSet { requestFrame() } }
@@ -21,23 +115,65 @@ final class TavernCardSurfaceView: NSView, MTKViewDelegate {
     private var construction = TavernPlankConstruction.agent
     private var selected = false
     private var maps: TavernCardMaps?
-    private var mapPixelSize = CGSize.zero
-    private var mapPointSize = CGSize.zero
-    private var timer: Timer?
+    private var materialKey: TavernCardMaterialKey?
+    private var visibilityShadow: TavernCardShadow?
+    private var preparation: TavernCardPreparation?
+    private var preparingKey: TavernCardMaterialKey?
+    private var pendingKey: TavernCardMaterialKey?
+    private var generation: UInt64 = 0
     private var observers: [NSObjectProtocol] = []
+    private var windowObservers: [NSObjectProtocol] = []
     private weak var observedClip: NSClipView?
     private var clipObserver: NSObjectProtocol?
     private var dirty = true
+    private var flushScheduled = false
     private var clock: Double = 0
     private var previousTime: CFTimeInterval?
+    private var clockActive = false
+    private var geometrySize = CGSize.zero
+    private var geometryPixels = CGSize.zero
+    #if TAVERN_RENDER_TESTING
+    var testingVisibilityPolicy: (() -> Bool)?
+    var testingReduceMotionPolicy: (() -> Bool)?
+    var onSubmittedFrame: ((TavernCardMaterialKey, CGRect, CGSize) -> Void)?
+    // Copied into each immutable job on main; the gate runs only on the readback worker.
+    var snapshotCompletionGate: (() -> Void)?
+    var testingSnapshotFailure: Error?
+    var onSnapshotCaptured: ((TavernCardSnapshotInputs, TavernCardMaps) -> Void)?
+    var testingHeldMaps: TavernCardMaps? { maps }
+    var testingMaterialKey: TavernCardMaterialKey? { materialKey }
+    var testingHeldShadow: MTLTexture? { visibilityShadow?.texture }
+    var testingShadowKey: TavernCardShadowKey? { visibilityShadow?.key }
+    var testingGeometry: SIMD4<Float>?
+    var testingLamp: SIMD4<Float>?
+    var testingMagicPosition: SIMD4<Float>?
+    var testingMagicColour: SIMD4<Float>?
+    var testingClock: Double {
+        get { clock }
+        set { clock = newValue }
+    }
+    func testingSetDrawableSize(_ size: CGSize) {
+        metalView.autoResizeDrawable = false
+        metalView.drawableSize = size
+        geometryChanged()
+    }
+    #endif
 
-    static func validateResources() throws {
-        _ = try TavernCardRenderer.shared.get()
+    static func prepareResources(completion: @escaping (Result<Void, Error>) -> Void) {
+        TavernCardRenderer.prepareResources(completion: completion)
     }
 
-    override init(frame frameRect: NSRect) {
-        do { renderer = try TavernCardRenderer.shared.get() }
+    override convenience init(frame frameRect: NSRect) {
+        do { self.init(frame: frameRect, renderer: try TavernCardRenderer.shared.get()) }
         catch { fatalError(error.localizedDescription) }
+    }
+
+    init(frame frameRect: NSRect, renderer: TavernCardRenderer) {
+        precondition(Thread.isMainThread)
+        guard case .success(let ready) = TavernCardRenderer.shared, ready === renderer else {
+            preconditionFailure("Card resources must be prepared before constructing a view")
+        }
+        self.renderer = renderer
         metalView = MTKView(frame: .zero, device: renderer.device)
         super.init(frame: frameRect)
         setAccessibilityElement(false)
@@ -53,9 +189,7 @@ final class TavernCardSurfaceView: NSView, MTKViewDelegate {
         metalView.delegate = self
         addSubview(metalView)
         let center = NotificationCenter.default
-        for name in [NSWindow.didChangeOcclusionStateNotification, NSWindow.didMiniaturizeNotification,
-                     NSWindow.didDeminiaturizeNotification, NSWindow.didResizeNotification,
-                     NSApplication.didHideNotification, NSApplication.didUnhideNotification] {
+        for name in [NSApplication.didHideNotification, NSApplication.didUnhideNotification] {
             observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 self?.requestFrame()
             })
@@ -68,11 +202,12 @@ final class TavernCardSurfaceView: NSView, MTKViewDelegate {
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
     deinit {
-        timer?.invalidate()
+        preparation?.cancel()
         for observer in observers {
             NotificationCenter.default.removeObserver(observer)
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
         }
+        for observer in windowObservers { NotificationCenter.default.removeObserver(observer) }
         if let clipObserver { NotificationCenter.default.removeObserver(clipObserver) }
     }
 
@@ -80,25 +215,50 @@ final class TavernCardSurfaceView: NSView, MTKViewDelegate {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
     func configure(seed: UInt64, construction: TavernPlankConstruction, selected: Bool) {
-        guard self.seed != seed || self.construction != construction || self.selected != selected || maps == nil else { return }
-        self.seed = seed
-        self.construction = construction
-        self.selected = selected
-        maps = nil
+        let changed = self.seed != seed || self.construction != construction || self.selected != selected
+        guard changed || maps == nil else { return }
+        if changed {
+            self.seed = seed
+            self.construction = construction
+            self.selected = selected
+            generation &+= 1
+            maps = nil
+            materialKey = nil
+            visibilityShadow = nil
+        }
+        if visible, geometrySize == bounds.size, geometryPixels == metalView.drawableSize, let key = exactKey() {
+            prefetch(key)
+        }
         requestFrame()
     }
 
     override func layout() {
         super.layout()
-        metalView.frame = bounds
+        if metalView.frame != bounds { metalView.frame = bounds }
         watchClipView()
-        requestFrame()
+        geometryChanged()
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        geometryChanged()
     }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        let center = NotificationCenter.default
+        for observer in windowObservers { center.removeObserver(observer) }
+        windowObservers.removeAll()
+        if let window {
+            for name in [NSWindow.didChangeOcclusionStateNotification, NSWindow.didMiniaturizeNotification,
+                         NSWindow.didDeminiaturizeNotification, NSWindow.didResizeNotification] {
+                windowObservers.append(center.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                    self?.requestFrame()
+                })
+            }
+        }
         watchClipView()
-        requestFrame()
+        geometryChanged()
     }
 
     override func viewDidMoveToSuperview() {
@@ -107,15 +267,25 @@ final class TavernCardSurfaceView: NSView, MTKViewDelegate {
         requestFrame()
     }
 
-    override func viewDidHide() { super.viewDidHide(); updateClock() }
+    override func viewDidHide() { super.viewDidHide(); requestFrame() }
     override func viewDidUnhide() { super.viewDidUnhide(); requestFrame() }
 
     private var visible: Bool {
+        // AppKit may report a nonempty visibleRect wholly outside this view.
+        guard !isHiddenOrHasHiddenAncestor, bounds.intersects(visibleRect) else { return false }
+        #if TAVERN_RENDER_TESTING
+        if let testingVisibilityPolicy { return testingVisibilityPolicy() }
+        #endif
         guard let window, window.isVisible, !window.isMiniaturized,
-              window.occlusionState.contains(.visible), !NSApp.isHidden,
-              !isHiddenOrHasHiddenAncestor, !visibleRect.isEmpty,
-              bounds.width > 0, bounds.height > 0 else { return false }
+              window.occlusionState.contains(.visible), !NSApp.isHidden else { return false }
         return true
+    }
+
+    private var reducedMotion: Bool {
+        #if TAVERN_RENDER_TESTING
+        if let testingReduceMotionPolicy { return testingReduceMotionPolicy() }
+        #endif
+        return NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
     }
 
     private func watchClipView() {
@@ -131,27 +301,110 @@ final class TavernCardSurfaceView: NSView, MTKViewDelegate {
         }
     }
 
+    private func exactKey(width: Int? = nil, height: Int? = nil) -> TavernCardMaterialKey? {
+        let width = width ?? Int(metalView.drawableSize.width.rounded())
+        let height = height ?? Int(metalView.drawableSize.height.rounded())
+        guard width > 0, height > 0, bounds.width > 0, bounds.height > 0 else { return nil }
+        return TavernCardMaterialKey(plank: TavernPlankKey(seed: seed, construction: construction,
+            pixelWidth: width, pixelHeight: height, pointWidth: bounds.width, pointHeight: bounds.height),
+            selected: selected)
+    }
+
+    private func prefetch(_ key: TavernCardMaterialKey) {
+        if let cached = renderer.cachedMaps(for: key) {
+            maps = cached
+            materialKey = key
+            return
+        }
+        if preparingKey == key { return }
+        guard preparation == nil else { pendingKey = key; return }
+        let token = generation
+        preparingKey = key
+        preparation = renderer.requestPreparation(for: key, accepting: { [weak self] in
+            guard let self else { return false }
+            return self.visible && self.generation == token && self.exactKey() == key
+        }) { [weak self] result in
+            guard let self else { return }
+            self.preparation = nil
+            self.preparingKey = nil
+            if self.visible && self.generation == token && self.exactKey() == key {
+                switch result {
+                case .success(let maps):
+                    self.maps = maps
+                    self.materialKey = key
+                    self.requestFrame()
+                case .failure(let error):
+                    if error is TavernPreparationError { self.requestFrame() }
+                    else { fatalError(error.localizedDescription) }
+                }
+            }
+            let pending = self.pendingKey
+            self.pendingKey = nil
+            if self.visible, let pending, self.exactKey() == pending { self.prefetch(pending) }
+        }
+    }
+
     private func requestFrame() {
+        dirty = true
+        updateClock()
+        guard visible, !flushScheduled else { return }
+        flushScheduled = true
+        RunLoop.main.perform(inModes: [.default, .eventTracking, .modalPanel]) { [weak self] in
+            guard let self else { return }
+            self.flushScheduled = false
+            guard self.dirty else { return }
+            self.metalView.draw()
+        }
+    }
+
+    private func geometryChanged() {
+        let changed = geometrySize != bounds.size || geometryPixels != metalView.drawableSize
+        geometrySize = bounds.size
+        geometryPixels = metalView.drawableSize
+        guard changed else { updateClock(); return }
+        if changed {
+            generation &+= 1
+            maps = nil
+            materialKey = nil
+            visibilityShadow = nil
+            pendingKey = nil
+            preparation?.cancel()
+        }
         dirty = true
         updateClock()
         if visible { metalView.draw() }
     }
 
     private func updateClock() {
-        let run = visible && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        if run && timer == nil {
-            previousTime = nil
-            let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
-                guard let self else { return }
-                guard self.visible else { self.updateClock(); return }
-                self.metalView.draw()
-            }
-            RunLoop.main.add(timer, forMode: .common)
-            self.timer = timer
-        } else if !run {
-            timer?.invalidate()
-            timer = nil
-            previousTime = nil
+        let shown = visible
+        let run = shown && !reducedMotion
+        if clockActive != run {
+            clockActive = run
+            TavernCardClock.shared.setActive(self, run)
+        }
+        if !run { previousTime = nil }
+        if !shown {
+            generation &+= 1
+            preparation?.cancel()
+            pendingKey = nil
+            maps = nil
+            materialKey = nil
+            visibilityShadow = nil
+        }
+    }
+
+    fileprivate func clockTick() {
+        guard visible, !reducedMotion else { updateClock(); return }
+        dirty = true
+        // A pending invalidation and this periodic tick share the deferred flush.
+        requestFrame()
+    }
+
+    private func advanceClock() {
+        let now = CACurrentMediaTime()
+        if !reducedMotion {
+            if let previousTime { clock += min(now - previousTime, 0.1) }
+            previousTime = now
         }
     }
 
@@ -161,14 +414,17 @@ final class TavernCardSurfaceView: NSView, MTKViewDelegate {
 
     func draw(in view: MTKView) {
         guard visible else { updateClock(); return }
-        let reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        guard dirty || !reduced else { return }
-        let width = Int(view.drawableSize.width.rounded())
-        let height = Int(view.drawableSize.height.rounded())
-        guard width > 0, height > 0,
+        guard dirty || !reducedMotion, let key = exactKey(),
               let drawable = view.currentDrawable, let pass = view.currentRenderPassDescriptor,
               let command = renderer.queue.makeCommandBuffer() else { return }
-        encode(width: width, height: height, pass: pass, command: command)
+        guard drawable.texture.width == key.plank.pixelWidth,
+              drawable.texture.height == key.plank.pixelHeight else { return }
+        let maps = exactMaps(for: key, retain: true)
+        advanceClock()
+        do {
+            visibilityShadow = try encode(maps: maps, key: key, uniforms: captureUniforms(),
+                                          pass: pass, command: command)
+        } catch { fatalError(error.localizedDescription) }
         command.present(drawable)
         command.addCompletedHandler { command in
             if command.status == .error {
@@ -176,31 +432,27 @@ final class TavernCardSurfaceView: NSView, MTKViewDelegate {
             }
         }
         command.commit()
+        #if TAVERN_RENDER_TESTING
+        onSubmittedFrame?(key, bounds, view.drawableSize)
+        #endif
         dirty = false
     }
 
-    private func encode(width: Int, height: Int, pass: MTLRenderPassDescriptor, command: MTLCommandBuffer) {
-        let reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        let pixelSize = CGSize(width: width, height: height)
-        if maps == nil || mapPixelSize != pixelSize || mapPointSize != bounds.size {
-            let key = "\(seed):\(construction.rawValue):\(width)x\(height):\(bounds.width)x\(bounds.height)"
-            do {
-                maps = try renderer.maps(seed: seed, construction: construction, selected: selected, width: width,
-                    height: height, pointSize: bounds.size, key: key)
-                mapPixelSize = pixelSize
-                mapPointSize = bounds.size
-            } catch { fatalError(error.localizedDescription) }
-        }
-        guard let maps else { fatalError("Tavern materials: encode requires prepared maps") }
-        let now = CACurrentMediaTime()
-        if !reduced {
-            if let previousTime { clock += min(now - previousTime, 0.1) }
-            previousTime = now
-        }
-        let flicker = reduced ? 1 : 1 + 0.035 * sin(clock * 5.3)
+    private func exactMaps(for key: TavernCardMaterialKey, retain: Bool) -> TavernCardMaps {
+        if materialKey == key, let maps { return maps }
+        do {
+            let result = try renderer.buildMapsSynchronously(for: key)
+            if retain {
+                maps = result
+                materialKey = key
+            }
+            return result
+        } catch { fatalError(error.localizedDescription) }
+    }
+
+    private func captureUniforms() -> TavernCardUniforms {
+        let flicker = reducedMotion ? 1 : 1 + 0.035 * sin(clock * 5.3)
             + 0.025 * sin(clock * 8.71) + 0.012 * sin(clock * 13.5)
-        // Read every drawn frame: scrolling changes the fixed lantern's local position.
-        // Without a configured real lamp the card receives ambient light only.
         let light = lightPositionProvider?()
         let scale = min(1, bounds.height / 140)
         let magic = magicLightProvider?()
@@ -213,49 +465,153 @@ final class TavernCardSurfaceView: NSView, MTKViewDelegate {
             magicPosition: SIMD4(Float((magic?.position.x ?? 0) / scale), Float((magic?.position.y ?? 0) / scale),
                                  42, magic?.power ?? 0),
             magicColour: SIMD4(magic?.colour.x ?? 0, magic?.colour.y ?? 0, magic?.colour.z ?? 0, selected ? 1 : 0))
+        #if TAVERN_RENDER_TESTING
+        if let testingGeometry { uniforms.geometry = testingGeometry }
+        if let testingLamp { uniforms.lamp = testingLamp }
+        if let testingMagicPosition { uniforms.magicPosition = testingMagicPosition }
+        if let testingMagicColour { uniforms.magicColour = testingMagicColour }
+        #endif
+        return uniforms
+    }
+
+    private func encode(maps: TavernCardMaps, key: TavernCardMaterialKey,
+                        uniforms captured: TavernCardUniforms,
+                        pass: MTLRenderPassDescriptor, command: MTLCommandBuffer) throws -> TavernCardShadow {
+        guard let target = pass.colorAttachments[0].texture else {
+            throw TavernCardSnapshotError.unavailable
+        }
+        let shadowKey = TavernCardShadowKey(material: key, pixelWidth: target.width,
+            pixelHeight: target.height, geometry: captured.geometry, lamp: captured.lamp)
+        let capturedShadow: TavernCardShadow
+        if let shadow = visibilityShadow, shadow.key == shadowKey {
+            capturedShadow = shadow
+        } else {
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .r32Float, width: target.width, height: target.height, mipmapped: false)
+            descriptor.storageMode = .private
+            descriptor.usage = [.renderTarget, .shaderRead]
+            guard let texture = renderer.device.makeTexture(descriptor: descriptor) else {
+                throw TavernCardSnapshotError.unavailable
+            }
+            capturedShadow = TavernCardShadow(key: shadowKey, texture: texture)
+            let shadowPass = MTLRenderPassDescriptor()
+            shadowPass.colorAttachments[0].texture = texture
+            shadowPass.colorAttachments[0].loadAction = .dontCare
+            shadowPass.colorAttachments[0].storeAction = .store
+            guard let encoder = command.makeRenderCommandEncoder(descriptor: shadowPass) else {
+                throw TavernCardSnapshotError.encoder
+            }
+            var uniforms = captured
+            encoder.setRenderPipelineState(renderer.shadowPipeline)
+            encoder.setFragmentBytes(&uniforms, length: MemoryLayout<TavernCardUniforms>.stride, index: 0)
+            encoder.setFragmentTexture(maps.textures[1], index: 1)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            encoder.endEncoding()
+        }
+        var uniforms = captured
         guard let encoder = command.makeRenderCommandEncoder(descriptor: pass) else {
-            fatalError(L("core.card.encoderFailed"))
+            throw TavernCardSnapshotError.encoder
         }
         encoder.setRenderPipelineState(renderer.pipeline)
         encoder.setFragmentBytes(&uniforms, length: MemoryLayout<TavernCardUniforms>.stride, index: 0)
         for (index, texture) in maps.textures.enumerated() { encoder.setFragmentTexture(texture, index: index) }
+        encoder.setFragmentTexture(capturedShadow.texture, index: 4)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         encoder.endEncoding()
+        // Keep replaced textures and their exact maps alive until all encoded reads finish.
+        command.addCompletedHandler { _ in
+            withExtendedLifetime((maps, capturedShadow)) {}
+        }
+        return capturedShadow
     }
 
-    // cacheDisplay не читает CAMetalLayer. Readback нужен только при создании
-    // образа перетаскивания, а обычные кадры остаются framebufferOnly.
-    func snapshotImage() -> CGImage? {
-        guard bounds.width > 0, bounds.height > 0 else { return nil }
-        let scale = window?.backingScaleFactor ?? 2
-        let width = max(1, Int((bounds.width * scale).rounded()))
-        let height = max(1, Int((bounds.height * scale).rounded()))
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
-        descriptor.storageMode = .shared
-        descriptor.usage = .renderTarget
-        guard let texture = renderer.device.makeTexture(descriptor: descriptor),
-              let command = renderer.queue.makeCommandBuffer(),
-              let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8,
-                bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
-                bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue),
-              let data = context.data else {
-            fatalError(L("core.card.snapshotUnavailable"))
+    private static let snapshotReadbackQueue = DispatchQueue(
+        label: "org.herdr.tavern.card-snapshot", qos: .userInitiated)
+
+    func requestSnapshot(completion: @escaping (Result<CGImage, Error>) -> Void) {
+        precondition(Thread.isMainThread)
+        let deliver: (Result<CGImage, Error>) -> Void = { result in
+            RunLoop.main.perform(inModes: [.default, .eventTracking, .modalPanel]) {
+                completion(result)
+            }
         }
-        let pass = MTLRenderPassDescriptor()
-        pass.colorAttachments[0].texture = texture
-        pass.colorAttachments[0].loadAction = .clear
-        pass.colorAttachments[0].storeAction = .store
-        pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
-        encode(width: width, height: height, pass: pass, command: command)
-        command.commit()
-        command.waitUntilCompleted()
-        guard command.status == .completed else {
-            fatalError(L("core.card.snapshotFailed", String(describing: command.error)))
-        }
-        texture.getBytes(data, bytesPerRow: width * 4,
-                         from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
-        return context.makeImage()
+        do {
+            guard bounds.width > 0, bounds.height > 0 else {
+                throw TavernCardSnapshotError.unavailable
+            }
+            let shown = visible
+            if !shown { updateClock() }
+            let scale = window?.backingScaleFactor ?? 2
+            let width = max(1, Int((bounds.width * scale).rounded()))
+            let height = max(1, Int((bounds.height * scale).rounded()))
+            guard let key = exactKey(width: width, height: height) else {
+                throw TavernCardSnapshotError.unavailable
+            }
+            // Capture all live inputs together; snapshot never advances the animation clock.
+            let uniforms = captureUniforms()
+            let capturedMaps: TavernCardMaps
+            if materialKey == key, let maps {
+                capturedMaps = maps
+            } else {
+                capturedMaps = try renderer.buildMapsSynchronously(for: key)
+                if shown { maps = capturedMaps; materialKey = key }
+            }
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
+            descriptor.storageMode = .shared
+            descriptor.usage = .renderTarget
+            guard let texture = renderer.device.makeTexture(descriptor: descriptor),
+                  let command = renderer.queue.makeCommandBuffer() else {
+                throw TavernCardSnapshotError.unavailable
+            }
+            let pass = MTLRenderPassDescriptor()
+            pass.colorAttachments[0].texture = texture
+            pass.colorAttachments[0].loadAction = .clear
+            pass.colorAttachments[0].storeAction = .store
+            pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
+            // New snapshot shadows remain job-local, including failed GPU submissions.
+            // Only an already exact live shadow can be reused.
+            _ = try encode(maps: capturedMaps, key: key, uniforms: uniforms, pass: pass, command: command)
+            #if TAVERN_RENDER_TESTING
+            let completionGate = snapshotCompletionGate
+            let injectedFailure = testingSnapshotFailure
+            onSnapshotCaptured?(TavernCardSnapshotInputs(
+                key: key, bounds: bounds, clock: clock, geometry: uniforms.geometry,
+                lamp: uniforms.lamp, magicPosition: uniforms.magicPosition,
+                magicColour: uniforms.magicColour), capturedMaps)
+            #endif
+            command.addCompletedHandler { command in
+                // Neither logical cancellation nor view detachment releases this job's maps.
+                let gpuError: Error? = command.status == .completed ? nil :
+                    TavernCardSnapshotError.gpu(String(describing: command.error))
+                Self.snapshotReadbackQueue.async {
+                    withExtendedLifetime(capturedMaps) {
+                        #if TAVERN_RENDER_TESTING
+                        completionGate?()
+                        if let injectedFailure { deliver(.failure(injectedFailure)); return }
+                        #endif
+                        if let gpuError { deliver(.failure(gpuError)); return }
+                        guard let context = CGContext(
+                            data: nil, width: width, height: height, bitsPerComponent: 8,
+                            bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue |
+                                CGBitmapInfo.byteOrder32Little.rawValue),
+                              let data = context.data else {
+                            deliver(.failure(TavernCardSnapshotError.unavailable))
+                            return
+                        }
+                        texture.getBytes(data, bytesPerRow: width * 4,
+                            from: MTLRegionMake2D(0, 0, width, height), mipmapLevel: 0)
+                        guard let image = context.makeImage() else {
+                            deliver(.failure(TavernCardSnapshotError.unavailable))
+                            return
+                        }
+                        deliver(.success(image))
+                    }
+                }
+            }
+            command.commit()
+        } catch { deliver(.failure(error)) }
     }
 }
 
@@ -266,23 +622,128 @@ private struct TavernCardUniforms {
     var magicColour: SIMD4<Float> // RGB: talisman light; W: steady selection illumination.
 }
 
-private final class TavernCardMaps: NSObject {
+final class TavernCardMaps: NSObject {
     let textures: [MTLTexture]
     init(_ textures: [MTLTexture]) { self.textures = textures }
 }
 
-private final class TavernCardRenderer {
-    static let shared: Result<TavernCardRenderer, Error> = Result { try TavernCardRenderer() }
+private final class TavernMaterialCacheKey<Value: Hashable>: NSObject {
+    let value: Value
+    init(_ value: Value) { self.value = value }
+    override var hash: Int { value.hashValue }
+    override func isEqual(_ object: Any?) -> Bool {
+        (object as? TavernMaterialCacheKey<Value>)?.value == value
+    }
+}
+
+fileprivate final class TavernCardPreparation {
+    private let lock = NSLock()
+    private var cancelled = false
+    private var started = false
+    func cancel() {
+        lock.lock()
+        if !started { cancelled = true }
+        lock.unlock()
+    }
+    func begin() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !cancelled else { return false }
+        started = true
+        return true
+    }
+}
+
+private enum TavernPreparationError: Error { case cancelled }
+
+private enum TavernRendererPreparationError: Error {
+    case notReady
+}
+
+final class TavernCardRenderer {
+    private enum ResourceState {
+        case idle
+        case preparing([(Result<Void, Error>) -> Void])
+        case ready(TavernCardRenderer)
+        case failed(Error)
+    }
+    private static var resourceState = ResourceState.idle
+    private static let resourceWorker = DispatchQueue(
+        label: "org.herdr.tavern.renderer-preparation", qos: .userInitiated)
+    #if TAVERN_RENDER_TESTING
+    // Set on main; each job captures its gate before leaving main.
+    static var resourcePreparationGate: (() -> Void)?
+    #endif
+
+    static var shared: Result<TavernCardRenderer, Error> {
+        precondition(Thread.isMainThread)
+        switch resourceState {
+        case .ready(let renderer): return .success(renderer)
+        case .failed(let error): return .failure(error)
+        case .idle, .preparing: return .failure(TavernRendererPreparationError.notReady)
+        }
+    }
+
+    fileprivate static func prepareResources(completion: @escaping (Result<Void, Error>) -> Void) {
+        precondition(Thread.isMainThread)
+        switch resourceState {
+        case .ready:
+            DispatchQueue.main.async { completion(.success(())) }
+        case .failed(let error):
+            DispatchQueue.main.async { completion(.failure(error)) }
+        case .preparing(var waiters):
+            waiters.append(completion)
+            resourceState = .preparing(waiters)
+        case .idle:
+            resourceState = .preparing([completion])
+            #if TAVERN_RENDER_TESTING
+            let gate = resourcePreparationGate
+            #endif
+            resourceWorker.async {
+                let result: Result<TavernCardRenderer, Error> = autoreleasepool {
+                    #if TAVERN_RENDER_TESTING
+                    gate?()
+                    #endif
+                    return Result { try TavernCardRenderer() }
+                }
+                DispatchQueue.main.async {
+                    guard case .preparing(let waiters) = resourceState else {
+                        preconditionFailure("Renderer preparation lost its waiters")
+                    }
+                    let completionResult: Result<Void, Error>
+                    switch result {
+                    case .success(let renderer):
+                        resourceState = .ready(renderer)
+                        renderer.activateMemoryPressureObservation()
+                        completionResult = .success(())
+                    case .failure(let error):
+                        resourceState = .failed(error)
+                        completionResult = .failure(error)
+                    }
+                    for waiter in waiters { waiter(completionResult) }
+                }
+            }
+        }
+    }
     let device: MTLDevice
     let queue: MTLCommandQueue
     let pipeline: MTLRenderPipelineState
-    private let cache = NSCache<NSString, TavernCardMaps>()
-    private let plankCache = NSCache<NSString, TavernPlankMaps>()
+    let shadowPipeline: MTLRenderPipelineState
+    private let cache = NSCache<TavernMaterialCacheKey<TavernCardMaterialKey>, TavernCardMaps>()
+    private let plankCache = NSCache<TavernMaterialCacheKey<TavernPlankKey>, TavernPlankMaps>()
     private var sources: [String: CGImage] = [:]
     private let root: URL
     private let planks: TavernPlankMaterial
+    private let workerPlanks: TavernPlankMaterial
+    private let preparationWorker = DispatchQueue(label: "org.herdr.tavern.material-preparation", qos: .userInitiated)
+    private var preparations: [TavernCardMaterialKey: [TavernCardPreparation]] = [:]
+    private var memoryPressure: DispatchSourceMemoryPressure?
+    #if TAVERN_RENDER_TESTING
+    var preparationGate: ((TavernCardMaterialKey) -> Void)?
+    #endif
 
     private init() throws {
+        precondition(!Thread.isMainThread)
         guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue() else {
             throw TavernCardResourceError.invalid(L("core.card.metalUnavailable"))
         }
@@ -301,6 +762,7 @@ private final class TavernCardRenderer {
             throw TavernCardResourceError.invalid(L("core.card.unreadableFile", atlasURL.path))
         }
         planks = try TavernPlankMaterial(atlas: atlas)
+        workerPlanks = try TavernPlankMaterial(atlas: atlas)
         let library = try device.makeLibrary(source: String(contentsOf: shader, encoding: .utf8), options: nil)
         let descriptor = MTLRenderPipelineDescriptor()
         descriptor.vertexFunction = library.makeFunction(name: "tavernCardVertex")
@@ -312,11 +774,109 @@ private final class TavernCardRenderer {
         descriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
         descriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
         pipeline = try device.makeRenderPipelineState(descriptor: descriptor)
+        let shadowDescriptor = MTLRenderPipelineDescriptor()
+        shadowDescriptor.vertexFunction = library.makeFunction(name: "tavernCardVertex")
+        shadowDescriptor.fragmentFunction = library.makeFunction(name: "tavernCardShadowFragment")
+        shadowDescriptor.colorAttachments[0].pixelFormat = .r32Float
+        shadowPipeline = try device.makeRenderPipelineState(descriptor: shadowDescriptor)
         cache.totalCostLimit = 96 * 1024 * 1024
         cache.countLimit = 72
         plankCache.totalCostLimit = 32 * 1024 * 1024
         plankCache.countLimit = 48
         for suffix in ["", "-height", "-material"] { _ = try image("sprites/bookmark\(suffix)") }
+        for kind in 0..<4 { _ = try bookmarkMap(kind: kind) }
+        _ = try contactShadow()
+    }
+
+    private func activateMemoryPressureObservation() {
+        precondition(Thread.isMainThread)
+        precondition(memoryPressure == nil)
+        let pressure = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .main)
+        pressure.setEventHandler { [weak self] in
+            self?.purgeReusableCaches()
+            NotificationCenter.default.post(name: .tavernMemoryPressure, object: nil)
+        }
+        pressure.resume()
+        memoryPressure = pressure
+    }
+
+    deinit { memoryPressure?.cancel() }
+
+    func purgeReusableCaches() {
+        precondition(Thread.isMainThread)
+        cache.removeAllObjects()
+        plankCache.removeAllObjects()
+    }
+
+    func cachedMaps(for key: TavernCardMaterialKey) -> TavernCardMaps? {
+        precondition(Thread.isMainThread)
+        return cache.object(forKey: TavernMaterialCacheKey(key))
+    }
+
+    func buildMapsSynchronously(for key: TavernCardMaterialKey) throws -> TavernCardMaps {
+        precondition(Thread.isMainThread)
+        // Queued work is dispensable; already-started work never blocks exact display.
+        for preparation in preparations[key] ?? [] { preparation.cancel() }
+        if let maps = cachedMaps(for: key) { return maps }
+        let base = plankCache.object(forKey: TavernMaterialCacheKey(key.plank))
+        let result = try build(key: key, planks: planks, base: base)
+        return publish(result, for: key)
+    }
+
+    func requestPreparation(for key: TavernCardMaterialKey,
+                            completion: @escaping (Result<TavernCardMaps, Error>) -> Void) {
+        _ = requestPreparation(for: key, accepting: { true }, completion: completion)
+    }
+
+    @discardableResult
+    fileprivate func requestPreparation(for key: TavernCardMaterialKey, accepting: @escaping () -> Bool,
+                            completion: @escaping (Result<TavernCardMaps, Error>) -> Void) -> TavernCardPreparation {
+        precondition(Thread.isMainThread)
+        let token = TavernCardPreparation()
+        if let cached = cachedMaps(for: key) {
+            RunLoop.main.perform(inModes: [.default, .eventTracking, .modalPanel]) {
+                completion(.success(cached))
+            }
+            return token
+        }
+        preparations[key, default: []].append(token)
+        #if TAVERN_RENDER_TESTING
+        let gate = preparationGate
+        #endif
+        // No mutable base context crosses the queue boundary. workerPlanks has its own atlas.
+        preparationWorker.async { [self] in
+            let result: Result<(TavernCardMaps, TavernPlankMaps), Error> = autoreleasepool {
+                guard token.begin() else { return .failure(TavernPreparationError.cancelled) }
+                #if TAVERN_RENDER_TESTING
+                gate?(key)
+                #endif
+                return Result { try build(key: key, planks: workerPlanks, base: nil) }
+            }
+            RunLoop.main.perform(inModes: [.default, .eventTracking, .modalPanel]) { [self] in
+                preparations[key]?.removeAll { $0 === token }
+                if preparations[key]?.isEmpty == true { preparations.removeValue(forKey: key) }
+                if let winner = cachedMaps(for: key) {
+                    completion(.success(winner))
+                } else if accepting() {
+                    completion(result.map { publish($0, for: key) })
+                } else {
+                    // Stale jobs cannot displace useful current cache entries.
+                    completion(result.map { $0.0 })
+                }
+            }
+        }
+        return token
+    }
+
+    private func publish(_ result: (TavernCardMaps, TavernPlankMaps),
+                         for key: TavernCardMaterialKey) -> TavernCardMaps {
+        if let winner = cachedMaps(for: key) { return winner }
+        let cost = key.plank.pixelWidth * key.plank.pixelHeight * 16
+        if plankCache.object(forKey: TavernMaterialCacheKey(key.plank)) == nil {
+            plankCache.setObject(result.1, forKey: TavernMaterialCacheKey(key.plank), cost: cost)
+        }
+        cache.setObject(result.0, forKey: TavernMaterialCacheKey(key), cost: cost)
+        return result.0
     }
 
     private func image(_ path: String) throws -> CGImage {
@@ -369,18 +929,13 @@ private final class TavernCardRenderer {
         return image
     }
 
-    func maps(seed: UInt64, construction: TavernPlankConstruction, selected: Bool,
-              width: Int, height: Int, pointSize: CGSize, key: String) throws -> TavernCardMaps {
-        let textureKey = "\(key):\(selected)" as NSString
-        if let maps = cache.object(forKey: textureKey) { return maps }
-        let base: TavernPlankMaps
-        if let cached = plankCache.object(forKey: key as NSString) {
-            base = cached
-        } else {
-            base = try planks.build(seed: seed, construction: construction,
-                width: width, height: height, pointSize: pointSize)
-            plankCache.setObject(base, forKey: key as NSString, cost: width * height * 16)
-        }
+    private func build(key: TavernCardMaterialKey, planks: TavernPlankMaterial,
+                       base cachedBase: TavernPlankMaps?) throws -> (TavernCardMaps, TavernPlankMaps) {
+        let width = key.plank.pixelWidth, height = key.plank.pixelHeight
+        let pointSize = CGSize(width: key.plank.pointWidth, height: key.plank.pointHeight)
+        let selected = key.selected
+        let base = try cachedBase ?? planks.build(seed: key.plank.seed, construction: key.plank.construction,
+            width: width, height: height, pointSize: pointSize)
         let scale = min(1, pointSize.height / 140)
         let xScale = CGFloat(width) / pointSize.width
         let yScale = CGFloat(height) / pointSize.height
@@ -407,10 +962,10 @@ private final class TavernCardRenderer {
                     context.saveGState()
                     let clip = board.insetBy(dx: 5 * unitX, dy: 5 * unitY)
                     context.clip(to: CGRect(x: clip.minX, y: CGFloat(height) - clip.maxY, width: clip.width, height: clip.height))
-                    draw(try contactShadow(), in: CGRect(x: CGFloat(width) - 92 * unitX, y: -5 * unitY, width: 36 * unitX, height: 112 * unitY))
+                    draw(sources["bookmark-contact"]!, in: CGRect(x: CGFloat(width) - 92 * unitX, y: -5 * unitY, width: 36 * unitX, height: 112 * unitY))
                     context.restoreGState()
                 }
-                draw(try bookmarkMap(kind: kind),
+                draw(sources["bookmark-map:\(kind)"]!,
                     in: CGRect(x: CGFloat(width) - 82 * unitX, y: 4 * unitY, width: 16 * unitX, height: 88 * unitY))
             }
             let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm,
@@ -424,8 +979,6 @@ private final class TavernCardRenderer {
                 withBytes: data, bytesPerRow: width * 4)
             textures.append(texture)
         }
-        let maps = TavernCardMaps(textures)
-        cache.setObject(maps, forKey: textureKey, cost: width * height * 16)
-        return maps
+        return (TavernCardMaps(textures), base)
     }
 }

@@ -7,7 +7,7 @@ import CoreText
     static func render(_ surface: SurfaceView, cells: [TerminalCell], dirty: NSRect? = nil) throws -> NSBitmapImageRep {
         try surface.apply(metadata: ["boot_id": "glyph-test", "projection_revision": 1,
                                      "surface_revision": 1, "width": cells.count, "height": 1],
-                          segments: [CellSegment(x: 0, y: 0, cells: cells)], assets: [], patch: false)
+                          segments: [CellSegment(x: 0, y: 0, cells: cells)], images: [:], patch: false)
         surface.setFrameSize(NSSize(width: CGFloat(cells.count) * 8, height: 20))
         let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: cells.count * 8 * scale,
                                       pixelsHigh: 20 * scale, bitsPerSample: 8, samplesPerPixel: 4,

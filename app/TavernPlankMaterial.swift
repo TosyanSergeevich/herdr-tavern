@@ -1,7 +1,7 @@
 import AppKit
 
 /// Construction is independent of selection and list position. Coordinates are points, Y down.
-enum TavernPlankConstruction: String {
+enum TavernPlankConstruction: String, Hashable {
     case agent, workspace
 }
 
@@ -104,6 +104,25 @@ final class TavernPlankMaterial {
             let x = (Float(column) + 0.5) * stepX
             return seam + sin(x * 0.11 + phase) * 0.1 + sin(x * 0.37 + phase) * 0.05
         } : []
+        let columnX: [Float] = (0..<width).map { (Float($0) + 0.5) * stepX }
+        let columnEdgeX: [Float] = columnX.map { min($0, pointWidth - $0) }
+        let leftColumns = (0..<width).map { max(0, $0 - 1) }
+        let rightColumns = (0..<width).map { min(width - 1, $0 + 1) }
+        let dxDenominators: [Float] = (0..<width).map {
+            Float(max(1, rightColumns[$0] - leftColumns[$0])) * stepX
+        }
+        let aboveRows = (0..<height).map { max(0, $0 - 1) }
+        let belowRows = (0..<height).map { min(height - 1, $0 + 1) }
+        let dyDenominators: [Float] = (0..<height).map {
+            Float(max(1, belowRows[$0] - aboveRows[$0])) * stepY
+        }
+        let columnGlint: [Float] = columnX.map {
+            exp(-pow(($0 - pointWidth * glintX) / 11, 2))
+        }
+        let rowGlint: [Float] = (0..<height).map { row in
+            let y = (Float(row) + 0.5) * stepY
+            return exp(-pow((y - pointHeight * glintY) / 5, 2))
+        }
         var elevations = [Float](repeating: 0, count: width * height)
 
         func smooth(_ a: Float, _ b: Float, _ value: Float) -> Float {
@@ -129,7 +148,7 @@ final class TavernPlankMaterial {
             // Профиль непрерывен; никаких полос и зависимости от hover.
             let recessedShade = 0.62 + 0.43 * pow(arch, 0.7)
             for column in 0..<width {
-                let x = (Float(column) + 0.5) * stepX
+                let x = columnX[column]
                 let joint = twoBoards ? jointProfile[column] : pointHeight
                 let lowerBoard = twoBoards && y > joint
                 let plank = lowerBoard ? second : first
@@ -141,7 +160,7 @@ final class TavernPlankMaterial {
                 let crown = plank.crown * min(1, boardHeight / 28) * 4 * t * (1 - t)
                 let lean = plank.tilt * (localY - boardHeight * 0.5)
                 let index = row * width + column, offset = index * 4
-                let edgeX = min(x, pointWidth - x), edgeY = min(y, pointHeight - y)
+                let edgeX = columnEdgeX[column], edgeY = min(y, pointHeight - y)
                 let distance = min(min(edgeX, edgeY), (edgeX + edgeY - 4.5) * 0.7071068) - 0.7
                 let alpha = smooth(-max(stepX, stepY) * 0.5, max(stepX, stepY) * 0.5, distance)
                 let source = sample(x: plank.x + x * plank.zoom, y: plank.y + localY * plank.zoom)
@@ -176,8 +195,8 @@ final class TavernPlankMaterial {
                     let face: Float = 0.66 + 0.29 * outer - 0.22 * inner
                     colour = SIMD3<Float>(0.43 + patina, 0.285 + patina * 0.7, 0.145 + patina * 0.35) * face
                     // Only short, local polished scars; the shader supplies their actual lighting.
-                    let topGlint = exp(-pow((x - pointWidth * glintX) / 11, 2)) * (1 - smooth(1, 2.4, y))
-                    let sideGlint = exp(-pow((y - pointHeight * glintY) / 5, 2))
+                    let topGlint = columnGlint[column] * (1 - smooth(1, 2.4, y))
+                    let sideGlint = rowGlint[row]
                         * (1 - smooth(1, 2.4, pointWidth - x))
                     let polish = min(1, topGlint + sideGlint * 0.55)
                     colour += SIMD3<Float>(0.18, 0.14, 0.075) * polish
@@ -197,12 +216,12 @@ final class TavernPlankMaterial {
         for row in 0..<height {
             for column in 0..<width {
                 let index = row * width + column, offset = index * 4
-                let left = max(0, column - 1), right = min(width - 1, column + 1)
-                let above = max(0, row - 1), below = min(height - 1, row + 1)
+                let left = leftColumns[column], right = rightColumns[column]
+                let above = aboveRows[row], below = belowRows[row]
                 let dx = (elevations[row * width + right] - elevations[row * width + left])
-                    / (Float(max(1, right - left)) * stepX)
+                    / dxDenominators[column]
                 let dy = (elevations[below * width + column] - elevations[above * width + column])
-                    / (Float(max(1, below - above)) * stepY)
+                    / dyDenominators[row]
                 let inverseLength = 1 / sqrt(dx * dx + dy * dy + 1)
                 let normal = SIMD3(-dx, -dy, 1) * inverseLength
                 let alpha = Float(pixels[0][offset + 3]) / 255

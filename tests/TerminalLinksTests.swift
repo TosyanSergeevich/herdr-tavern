@@ -25,6 +25,17 @@ import Foundation
         let home = URL(fileURLWithPath: NSHomeDirectory()).standardizedFileURL
         precondition(TerminalLinks.explicitTarget("~/", cwd: nil) == home)
         print("PASS: относительные и абсолютные пути, кириллица, пробелы, file URI и суффикс строки")
+        let literal = root.appendingPathComponent("main.swift:12:3")
+        try Data("literal suffix".utf8).write(to: literal)
+        precondition(target("main.swift:12:3", on: "main") == literal,
+                     "A literal filename must take precedence over a location suffix")
+        precondition(TerminalLinks.explicitTarget(literal.absoluteString, cwd: nil) == literal)
+        try FileManager.default.removeItem(at: literal)
+        precondition(target("main.swift:12:3", on: "main") == simple)
+        precondition(TerminalLinks.explicitTarget(literal.absoluteString, cwd: nil) == nil,
+                     "OSC-8 file targets must not strip location suffixes")
+        precondition(target("👩‍💻 См. main.swift:12:3", on: "main") == simple)
+        print("PASS: literal suffix precedence, exact OSC-8 targets and UTF-16 offsets")
         for value in ["javascript:alert(1)", "ssh://example.com", "file://remote/tmp/test", "https://", "https://example.com\n"] {
             precondition(TerminalLinks.explicitTarget(value, cwd: root.path) == nil, value)
         }

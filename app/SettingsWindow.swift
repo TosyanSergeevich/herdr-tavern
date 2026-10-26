@@ -59,6 +59,7 @@ final class TavernSettingsWindowController: NSWindowController {
     private var eventControls: [TavernSoundEvent: EventControls] = [:]
     private let detailsPopover = NSPopover()
     private var detailControls: DetailControls?
+    private var soundMutationBusy = false
     private enum Section: String { case sounds, agents }
     private let defaults: UserDefaults
     private let agentsView: AgentSettingsView
@@ -416,7 +417,8 @@ final class TavernSettingsWindowController: NSWindowController {
         let filename = custom ? settings.displayName(for: controls.event) : L("settings.sound.standard")
         controls.filename.stringValue = filename
         controls.filename.toolTip = filename
-        controls.reset.isEnabled = custom
+        controls.choose.isEnabled = !soundMutationBusy
+        controls.reset.isEnabled = custom && !soundMutationBusy
         controls.title.stringValue = controls.event.title
         controls.filename.setAccessibilityLabel(L("settings.sound.eventFile", controls.event.title))
         controls.choose.title = L("settings.sound.chooseFile")
@@ -580,7 +582,9 @@ final class TavernSettingsWindowController: NSWindowController {
     }
 
     @objc private func chooseSound(_ sender: NSButton) {
-        guard let event = event(for: sender), let window else { return }
+        guard !soundMutationBusy, let event = event(for: sender), let window else { return }
+        soundMutationBusy = true
+        refreshDetails()
         detailsPopover.close()
         let panel = NSOpenPanel()
         panel.title = L("settings.sound.chooseTitle", event.title)
@@ -596,24 +600,35 @@ final class TavernSettingsWindowController: NSWindowController {
             panel?.prompt = L("settings.choose")
         }
         panel.beginSheetModal(for: window) { [weak self] response in
-            self?.sheetLanguageUpdate = nil
-            guard let self, response == .OK, let url = panel.url else { return }
-            do {
-                try self.settings.replaceSound(for: event, with: url)
+            guard let self else { return }
+            self.sheetLanguageUpdate = nil
+            guard response == .OK, let url = panel.url else {
+                self.soundMutationBusy = false
                 self.refreshControls()
-            } catch {
-                self.showError("settings.sound.replaceFailed", event: event, error: error)
+                return
+            }
+            self.settings.replaceSound(for: event, with: url) { [weak self] result in
+                guard let self else { return }
+                self.soundMutationBusy = false
+                self.refreshControls()
+                if case .failure(let error) = result, self.window?.isVisible == true {
+                    self.showError("settings.sound.replaceFailed", event: event, error: error)
+                }
             }
         }
     }
 
     @objc private func resetSound(_ sender: NSButton) {
-        guard let event = event(for: sender) else { return }
-        do {
-            try settings.resetSound(for: event)
-            refreshControls()
-        } catch {
-            showError("settings.sound.resetFailed", event: event, error: error)
+        guard !soundMutationBusy, let event = event(for: sender) else { return }
+        soundMutationBusy = true
+        refreshDetails()
+        settings.resetSound(for: event) { [weak self] result in
+            guard let self else { return }
+            self.soundMutationBusy = false
+            self.refreshControls()
+            if case .failure(let error) = result, self.window?.isVisible == true {
+                self.showError("settings.sound.resetFailed", event: event, error: error)
+            }
         }
     }
 

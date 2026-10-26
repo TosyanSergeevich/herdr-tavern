@@ -86,7 +86,7 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     private var navigationTab = ""
     private var navigationTabViewportWidth: CGFloat = 0
     private var snapshot: [String: Any] = [:]
-    private var pendingSnapshot: [String: Any]?
+    private var pendingSnapshot: (snapshot: [String: Any], presentation: TavernNavigationPresentation)?
     private var connection: RustConnection?
     private var options: LaunchOptions?
     private let terminalLaunchEnvironment = ["PI_FORCE_IMAGE_PROTOCOL": "kitty"]
@@ -94,13 +94,15 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     private var connecting = false
     private var attached = false
     private var terminated = false
+    private var interfaceStarted = false
     private var surfaceActive = true
     private var resumeRequested = false
     private var requests: [EndpointAction] = []
     private var inFlight: EndpointAction?
     private var requestTimeout: Timer?
     private var lastGeometry = ""
-    private var navSignature: Data?
+    private var geometryRequest: UInt64 = 0
+    private var navigationPresentation: TavernNavigationPresentation?
     private var lastError: String?
     private var lastErrorLocalization: (() -> String)?
     private var publicRequestBusy = false
@@ -110,17 +112,37 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     private var settingsController: TavernSettingsWindowController?
     private var herdrMenuController: HerdrMenuController?
     private var herdrSetup: HerdrSetupController?
-    private lazy var agentIntegrations = AgentIntegrationService(executable: { [weak self] in
-        guard let options = self?.options else { throw TavernShellError { L("shell.error.launchOptions") } }
-        return try options.resolveExecutable()
-    })
+    private lazy var agentIntegrations: AgentIntegrationService = {
+        let launchOptions = options
+        return AgentIntegrationService(executable: {
+            guard let launchOptions else { throw TavernShellError { L("shell.error.launchOptions") } }
+            return try launchOptions.resolveExecutable()
+        })
+    }()
     private var agentWelcome: AgentWelcomeWindowController?
     private let notifications = TavernNotifications()
     private var unread = AgentUnreadTracker()
     private let navigationDrag = TavernNavigationDrag()
     private var paneGrips: [String: TavernPaneGrip] = [:]
+    private struct PaneGripLayoutKey: Equatable {
+        struct Pane: Equatable {
+            let paneID: String
+            let innerRect: NSRect
+        }
+        let available: Bool
+        let generation: Int
+        let bootID: String
+        let panes: [Pane]
+        let bounds: NSRect
+        let origin: NSPoint
+        let cellSize: NSSize
+        let language: TavernLanguage
+    }
+    private var paneGripLayoutKey: PaneGripLayoutKey?
+    private var paneGripSheetStarting = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        guard !terminated else { return }
         let launchOptions: LaunchOptions
         do {
             launchOptions = try LaunchOptions.parse(CommandLine.arguments)
@@ -135,18 +157,49 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         do {
             _ = try TavernMaterials.bundled.get()
             try LivingChromeView.validateResources()
-            try TavernCardSurfaceView.validateResources()
             try TavernTalismanView.validateResources()
             try TavernRuneParticlesView.validateResources()
         }
         catch { showStartupError(error.localizedDescription); return }
-        do { _ = try launchOptions.resolveExecutable() }
+        var rendererResult: Result<Void, Error>?
+        var executableResult: Result<String, Error>?
+        var continued = false
+        let finish: () -> Void = { [weak self] in
+            guard let self, !self.terminated, !continued,
+                  let rendererResult, let executableResult else { return }
+            continued = true
+            switch rendererResult {
+            case .failure(let error): self.showStartupError(error.localizedDescription)
+            case .success:
+                self.continueStartup(fonts: fonts, launchOptions: launchOptions, executableResult: executableResult)
+            }
+        }
+        TavernCardSurfaceView.prepareResources { [weak self] result in
+            guard let self, !self.terminated else { return }
+            rendererResult = result
+            finish()
+        }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = Result { try launchOptions.resolveExecutable() }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, !self.terminated else { return }
+                executableResult = result
+                finish()
+            }
+        }
+    }
+
+    private func continueStartup(fonts: TerminalFonts, launchOptions: LaunchOptions,
+                                 executableResult: Result<String, Error>) {
+        guard !terminated else { return }
+        options = launchOptions
+        do { _ = try executableResult.get() }
         catch NativeError.herdrNotFound {
             let setup = HerdrSetupController()
             herdrSetup = setup
             NSApp.activate(ignoringOtherApps: true)
             setup.present { [weak self] installed in
-                guard let self else { return }
+                guard let self, !self.terminated else { return }
                 self.herdrSetup = nil
                 if installed { self.startInterface(fonts: fonts) }
                 else { NSApp.terminate(nil) }
@@ -158,11 +211,16 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     }
 
     private func startInterface(fonts: TerminalFonts) {
+        guard !terminated, !interfaceStarted else { return }
+        interfaceStarted = true
         surface = SurfaceView(fonts: fonts)
         popupSurface = SurfaceView(fonts: fonts)
         buildWindow(); buildMenus(); wireSurface(surface)
         NotificationCenter.default.addObserver(self, selector: #selector(languageDidChange(_:)),
                                                name: .tavernLanguageDidChange, object: nil)
+        for name in [NSWindow.willBeginSheetNotification, NSWindow.didEndSheetNotification] {
+            NotificationCenter.default.addObserver(self, selector: #selector(paneGripSheetChanged(_:)), name: name, object: window)
+        }
         soundSettings.onChange = { [weak self] in self?.soundPlayer.settingsDidChange() }
         soundPlayer.onError = { [weak self] message in
             guard let self else { return }
@@ -819,7 +877,7 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         reconnectButton.title = L("shell.connect")
         if let lastErrorLocalization { lastError = lastErrorLocalization() }
         sidebarTransitionView?.removeFromSuperview(); sidebarTransitionView = nil
-        navSignature = nil
+        paneGripLayoutKey = nil
         buildMenus()
         rebuildNavigation()
     }
@@ -831,7 +889,7 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         requests.removeAll(); inFlight = nil; requestTimeout?.invalidate(); requestTimeout = nil
         pendingSnapshot = nil
         snapshot = [:]; surface.clear(); popupSurface.clear(); popupContainer.isHidden = true; surface.isHidden = true
-        lastGeometry = ""; navSignature = nil; resumeRequested = false
+        lastGeometry = ""; navigationPresentation = nil; paneGripLayoutKey = nil; resumeRequested = false
         connecting = true; attached = false; clearError(); rebuildNavigation()
         let cols = surface.cols, rows = surface.rows, scale = window.backingScaleFactor
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -847,7 +905,15 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
                         switch result { case .success(let event): self.receive(event); case .failure(let error): self.disconnect { error.localizedDescription } }
                     }
                     self.connecting = false; self.attached = true; self.surfaceActive = true
-                    self.clearError(); self.surface.updateGeometry(); self.rebuildNavigation()
+                    self.clearError()
+                    self.surface.updateGeometry()
+                    // Local geometry may already be cached from a resize while
+                    // open was pending; the new peer has not received it yet.
+                    let currentScale = max(1, self.window.backingScaleFactor)
+                    self.resize(cols: self.surface.cols, rows: self.surface.rows,
+                                width: Int(self.surface.cellWidth * currentScale),
+                                height: Int(self.surface.cellHeight * currentScale))
+                    self.rebuildNavigation()
                     self.send(["type":"focus", "focused": self.window.isKeyWindow])
                     self.soundPlayer.play(.connected)
                 }
@@ -862,6 +928,8 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     private func disconnect(_ message: String) { disconnect { message } }
     private func disconnect(_ message: @escaping () -> String) {
         attached = false; connecting = false; connection?.close(); connection = nil
+        paneGripLayoutKey = nil
+        surface.cancelLinkHover(); popupSurface.cancelLinkHover()
         surface.commandKeybindings.update(commands: [], prefixes: [], context: "")
         surface.commandKeybindings.resetInput()
         navigationDrag.cancel()
@@ -885,7 +953,12 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         let signature = "\(cols):\(rows):\(width):\(height)"
         guard signature != lastGeometry else { return }
         lastGeometry = signature
-        send(["type":"resize", "cols":cols, "rows":rows, "cell_width_px":width, "cell_height_px":height])
+        geometryRequest &+= 1
+        let request = geometryRequest
+        send(["type":"resize", "cols":cols, "rows":rows, "cell_width_px":width, "cell_height_px":height]) { [weak self] success in
+            guard let self, !success, self.geometryRequest == request, self.lastGeometry == signature else { return }
+            self.lastGeometry = ""
+        }
     }
     private func invokeConfiguredCommand(_ id: String, selection: [String: Any]?) {
         guard attached, popupID.isEmpty, window.attachedSheet == nil,
@@ -937,14 +1010,16 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             if !oldBoot.isEmpty && oldBoot != newBoot {
                 requests.removeAll(); inFlight = nil; requestTimeout?.invalidate(); requestTimeout = nil; surface.clear()
                 snapshot = [:]
+                navigationPresentation = nil; pendingSnapshot = nil; paneGripLayoutKey = nil
                 localizedError { L("shell.error.serverRestarted") }
             }
-            pendingSnapshot = event.metadata
+            guard let presentation = event.navigationPresentation else { return }
+            pendingSnapshot = (event.metadata, presentation)
             publishPendingSnapshot()
             updateVisibility()
         case UInt32(TAVERN_FULL), UInt32(TAVERN_PATCH):
             do {
-                try surface.apply(metadata: event.metadata, segments: event.segments, assets: event.assets, patch: event.kind == UInt32(TAVERN_PATCH))
+                try surface.apply(metadata: event.metadata, segments: event.segments, images: event.images, patch: event.kind == UInt32(TAVERN_PATCH))
                 if event.kind == UInt32(TAVERN_FULL) { try installPopup(event) }
                 publishPendingSnapshot()
                 updateVisibility()
@@ -973,7 +1048,8 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         }
     }
     private func publishPendingSnapshot() {
-        guard let replacement = pendingSnapshot else { return }
+        guard let pending = pendingSnapshot else { return }
+        let replacement = pending.snapshot
         // Состояние и кадр приходят отдельно. До готовности пары оставляем
         // предыдущую согласованную поверхность, не показывая пустой промежуток.
         let matches = string(surface.scene["boot_id"]) == string(replacement["boot_id"]) &&
@@ -986,6 +1062,7 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             }
         }
         snapshot = replacement; pendingSnapshot = nil
+        surface.refreshLinkHover(); popupSurface.refreshLinkHover()
         surface.commandKeybindings.update(commands: objects(snapshot["commands"]),
             prefixes: snapshot["command_prefixes"] as? [String] ?? [],
             context: [string(snapshot["boot_id"]), string(snapshot["focused_workspace_id"]),
@@ -993,10 +1070,10 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         var statuses: [String: String] = [:]
         for agent in objects(snapshot["agents"]) { statuses[string(agent["pane_id"])] = string(agent["agent_status"]) }
         let unreadChanged = unread.synchronize(bootID: string(snapshot["boot_id"]), statuses: statuses, viewedPane: viewedPaneID())
-        let keys = ["workspaces","tabs","panes","agents","focused_workspace_id","focused_tab_id","focused_pane_id"]
-        let navigation = snapshot.filter { keys.contains($0.key) }
-        let signature = try? JSONSerialization.data(withJSONObject: navigation, options: .sortedKeys)
-        if signature != navSignature || unreadChanged { navSignature = signature; rebuildNavigation() }
+        if pending.presentation != navigationPresentation || unreadChanged {
+            navigationPresentation = pending.presentation
+            rebuildNavigation()
+        }
         else { updateStatus() }
     }
     private func viewedPaneID() -> String? {
@@ -1022,6 +1099,8 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         let becameVisible = matches && surface.isHidden
         surface.isHidden = !matches
         popupContainer.isHidden = !matches || popupID.isEmpty
+        if !matches { surface.cancelLinkHover(); popupSurface.cancelLinkHover() }
+        else if becameVisible { surface.refreshLinkHover() }
         if matches && !popupID.isEmpty {
             layoutPopup()
             if window.attachedSheet == nil { window.makeFirstResponder(popupSurface) }
@@ -1042,7 +1121,7 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         frame["surface_revision"] = event.metadata["surface_revision"]
         frame["panes"] = [["pane_id":id, "focused":true, "mouse_reporting":flag(popup["mouse_reporting"]),
                             "inner_rect":["x":0,"y":0,"width":width,"height":height]]]
-        try popupSurface.apply(metadata: frame, segments: event.popupSegments, assets: [], patch: false)
+        try popupSurface.apply(metadata: frame, segments: event.popupSegments, images: [:], patch: false)
         popupID = id; popupTitle.stringValue = string(popup["title"])
         popupContainer.isHidden = false; layoutPopup()
     }
@@ -1059,7 +1138,7 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         case "semantic_notification":
             let notification = dictionary(notice["notification"])
             if let kind = AgentUnreadKind(notification: notification) {
-                let boot = string(pendingSnapshot?["boot_id"] ?? snapshot["boot_id"])
+                let boot = string(pendingSnapshot?.snapshot["boot_id"] ?? snapshot["boot_id"])
                 let viewed = boot == string(snapshot["boot_id"]) ? viewedPaneID() : nil
                 if unread.record(kind, paneID: string(notification["pane_id"]), bootID: boot, viewedPane: viewed) {
                     rebuildNavigation()
@@ -1623,10 +1702,32 @@ private extension TavernDelegate {
         return nil
     }
 
+    @objc private func paneGripSheetChanged(_ notification: Notification) {
+        // willBegin arrives before AppKit assigns attachedSheet.
+        paneGripSheetStarting = notification.name == NSWindow.willBeginSheetNotification
+        paneGripLayoutKey = nil
+        layoutPaneGrips()
+    }
+
     func layoutPaneGrips() {
         guard surface != nil else { return }
-        let available = attached && !surface.isHidden && popupID.isEmpty && window.attachedSheet == nil
+        let available = attached && !surface.isHidden && popupID.isEmpty
+            && !paneGripSheetStarting && window.attachedSheet == nil
         let visible = available ? objects(surface.scene["panes"]) : []
+        let key = PaneGripLayoutKey(available: available, generation: generation,
+            bootID: string(surface.scene["boot_id"]),
+            panes: visible.map { pane in
+                let geometry = dictionary(pane["inner_rect"])
+                return PaneGripLayoutKey.Pane(paneID: string(pane["pane_id"]),
+                    innerRect: NSRect(x: number(geometry["x"]), y: number(geometry["y"]),
+                                      width: number(geometry["width"]), height: number(geometry["height"])))
+            },
+            bounds: surface.bounds, origin: surface.convert(surface.bounds.origin, to: terminalFrame),
+            cellSize: NSSize(width: surface.cellWidth, height: surface.cellHeight),
+            language: TavernLocalization.shared.language)
+        guard key != paneGripLayoutKey else { return }
+        let languageChanged = paneGripLayoutKey?.language != key.language
+        paneGripLayoutKey = key
         let ids = Set(visible.map { string($0["pane_id"]) })
         for id in Array(paneGrips.keys) where !ids.contains(id) { paneGrips.removeValue(forKey: id)?.removeFromSuperview() }
         for pane in visible {
@@ -1634,6 +1735,7 @@ private extension TavernDelegate {
             let rect = surface.convert(NSRect(x: number(geometry["x"]) * surface.cellWidth, y: number(geometry["y"]) * surface.cellHeight,
                                               width: number(geometry["width"]) * surface.cellWidth, height: number(geometry["height"]) * surface.cellHeight), to: terminalFrame)
             let grip: TavernPaneGrip
+            let created = paneGrips[id] == nil
             if let existing = paneGrips[id] { grip = existing }
             else {
                 grip = TavernPaneGrip(title: "", target: self, action: #selector(focusPaneGrip(_:)))
@@ -1650,10 +1752,14 @@ private extension TavernDelegate {
                 grip.contextMenu = { [weak self] in self?.paneContextMenu(id) }
                 paneGrips[id] = grip; terminalFrame.addSubview(grip)
             }
-            grip.setAccessibilityLabel(L("shell.pane.drag.label", id))
-            grip.toolTip = L("shell.drag.help")
-            grip.frame = NSRect(x: rect.maxX - 26, y: rect.maxY - 16, width: 24, height: 14)
-            grip.isHidden = rect.width < 40 || rect.height < 24
+            if created || languageChanged {
+                grip.setAccessibilityLabel(L("shell.pane.drag.label", id))
+                grip.toolTip = L("shell.drag.help")
+            }
+            let frame = NSRect(x: rect.maxX - 26, y: rect.maxY - 16, width: 24, height: 14)
+            if grip.frame != frame { grip.frame = frame }
+            let hidden = rect.width < 40 || rect.height < 24
+            if grip.isHidden != hidden { grip.isHidden = hidden }
         }
     }
 
