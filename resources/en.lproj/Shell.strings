@@ -60,6 +60,7 @@
 "shell.error.sessionChanged" = "The session changed; the command was canceled";
 "shell.error.sound" = "Could not play sound";
 "shell.error.targetUnavailable" = "The target is no longer available. No command was sent.";
+"shell.error.titleUpdates" = "Could not update session names: %@";
 "shell.error.unknownCommand" = "Unknown interface command";
 "shell.error.unknownEvent" = "Unknown client event";
 "shell.error.unsupported" = "The server sent an unsupported representation; external files will not be opened";
@@ -148,7 +149,7 @@
 "shell.pane.moved" = "Moved pane";
 "shell.pane.number" = "Pane %ld";
 "shell.pane.rename" = "Rename pane";
-"shell.pane.rename.help" = "An empty name removes the custom pane name.";
+"shell.pane.rename.help" = "An empty name restores the automatic pane name. The tab name stays unchanged.";
 "shell.pane.rename.menu" = "Rename Pane…";
 "shell.pane.restore" = "Restore Split";
 "shell.pane.split.down" = "Split Down";
@@ -178,6 +179,7 @@
 "shell.tab.left" = "Move Left";
 "shell.tab.new" = "New tab";
 "shell.tab.rename" = "Rename tab";
+"shell.tab.rename.help" = "An empty name restores the automatic tab name.";
 "shell.tab.rename.menu" = "Rename Tab…";
 "shell.tab.right" = "Move Right";
 "shell.view" = "View";

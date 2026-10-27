@@ -13,6 +13,7 @@ extern "C" {
  * Нельзя использовать client после free; event независим от client. */
 typedef struct TavernClient TavernClient;
 typedef struct TavernEvent TavernEvent;
+typedef struct TavernTitleFeed TavernTitleFeed;
 typedef struct { const uint8_t *ptr; size_t len; } TavernBytes;
 typedef struct { uint16_t x, y; size_t count; uint8_t target; } TavernSegment;
 /* target 0: main grid; target 1: popup grid (full only, own width/height). */
@@ -70,6 +71,19 @@ void tavern_event_free(TavernEvent *event);
  * 0 success (including server response.error), -1 transport/protocol failure. */
 int32_t tavern_public_json(const char *socket_path, const uint8_t *json, size_t len,
     char **response, char **error);
+/* Public events.subscribe stream for pane.updated and pane.closed only.
+ * open waits for subscription_started (connect <=10s, handshake <=15s); off-main.
+ * next: 1 owned NUL-terminated JSON, 0 timeout, 2 EOF/closed, -1 failure.
+ * JSON/errors: tavern_string_free. On non-event returns *json=NULL.
+ * timeout_ms capped at 60000; 0 reads buffered/immediately available data.
+ * Lines <=1 MiB; partial/coalesced lines retained across next calls.
+ * One next reader. close is thread-safe and interrupts next without sending
+ * session commands. free ONLY after all C calls finish. No automatic retries. */
+TavernTitleFeed *tavern_title_feed_open(const char *socket_path, char **error);
+int32_t tavern_title_feed_next(TavernTitleFeed *feed, uint32_t timeout_ms,
+    char **json, char **error);
+void tavern_title_feed_close(TavernTitleFeed *feed);
+void tavern_title_feed_free(TavernTitleFeed *feed);
 /* Чистое чтение/редактирование TOML без IO; JSON-запрос <=1 MiB:
  * {content: String, edit?: {kind: theme|indicators|sound|toast, value: String|Bool}}.
  * Ответ: {content: String, settings: {theme: String, auto_switch: Bool,

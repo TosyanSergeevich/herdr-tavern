@@ -60,6 +60,7 @@
 "shell.error.sessionChanged" = "Сессия изменилась; команда отменена";
 "shell.error.sound" = "Не удалось воспроизвести звук";
 "shell.error.targetUnavailable" = "Объект больше недоступен. Команда не отправлена.";
+"shell.error.titleUpdates" = "Не удалось обновлять имена сессий: %@";
 "shell.error.unknownCommand" = "Неизвестная команда интерфейса";
 "shell.error.unknownEvent" = "Неизвестное событие клиента";
 "shell.error.unsupported" = "Сервер прислал неподдерживаемое представление; внешние файлы не открываются";
@@ -148,7 +149,7 @@
 "shell.pane.moved" = "Перенесённая панель";
 "shell.pane.number" = "Панель %ld";
 "shell.pane.rename" = "Переименовать панель";
-"shell.pane.rename.help" = "Пустое название убирает ручное имя панели.";
+"shell.pane.rename.help" = "Пустое название возвращает автоматическое имя панели. Имя вкладки не меняется.";
 "shell.pane.rename.menu" = "Переименовать панель…";
 "shell.pane.restore" = "Восстановить разделение";
 "shell.pane.split.down" = "Разделить снизу";
@@ -178,6 +179,7 @@
 "shell.tab.left" = "Передвинуть влево";
 "shell.tab.new" = "Новая вкладка";
 "shell.tab.rename" = "Переименовать вкладку";
+"shell.tab.rename.help" = "Пустое название возвращает автоматическое имя вкладки.";
 "shell.tab.rename.menu" = "Переименовать вкладку…";
 "shell.tab.right" = "Передвинуть вправо";
 "shell.view" = "Вид";

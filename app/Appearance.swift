@@ -23,7 +23,7 @@ enum TavernAppearance {
     static let idle = rgb(0x83cf8c)
     // Загружаем из ресурсов без системной регистрации и без подмены
     // установленными одноимёнными гарнитурами.
-    private static let interfaceFonts: Result<(body: CGFont, heading: CGFont), Error> = Result {
+    private static let interfaceFonts: Result<(body: CGFont, heading: CGFont, symbols: CGFont), Error> = Result {
         func load(_ name: String, _ ext: String) throws -> CGFont {
             guard let url = Bundle.main.url(forResource: name, withExtension: ext, subdirectory: "Fonts"),
                   let provider = CGDataProvider(url: url as CFURL), let face = CGFont(provider) else {
@@ -31,7 +31,8 @@ enum TavernAppearance {
             }
             return face
         }
-        return (try load("FrizQuadrataC", "ttf"), try load("MorpheusAlt1Cyr", "otf"))
+        return (try load("FrizQuadrataC", "ttf"), try load("MorpheusAlt1Cyr", "otf"),
+                try load("SymbolsNerdFont-Regular", "ttf"))
     }
     static func validateFonts() throws { _ = try interfaceFonts.get() }
     private static func bodyFont(size: CGFloat) -> NSFont {
@@ -41,6 +42,24 @@ enum TavernAppearance {
         CTFontCreateWithGraphicsFont(try! interfaceFonts.get().heading, size, nil, nil) as NSFont
     }
     static let bodyFont = bodyFont(size: 16)
+    private static let titleSymbolsFont = CTFontCreateWithGraphicsFont(try! interfaceFonts.get().symbols, 16, nil, nil) as NSFont
+    private static let statusSymbolsFont = CTFontCreateWithGraphicsFont(try! interfaceFonts.get().symbols, 12, nil, nil) as NSFont
+
+    static func navigationTitle(_ title: String, attributes: [NSAttributedString.Key: Any]) -> NSAttributedString {
+        let rendered = NSMutableAttributedString(string: title, attributes: attributes)
+        let symbols = (attributes[.font] as? NSFont)?.pointSize == statusFont.pointSize ? statusSymbolsFont : titleSymbolsFont
+        var offset = 0
+        for scalar in title.unicodeScalars {
+            let length = scalar.utf16.count
+            if (0xE000...0xF8FF).contains(scalar.value)
+                || (0xF0000...0xFFFFD).contains(scalar.value)
+                || (0x100000...0x10FFFD).contains(scalar.value) {
+                rendered.addAttribute(.font, value: symbols, range: NSRange(location: offset, length: length))
+            }
+            offset += length
+        }
+        return rendered
+    }
     static let headingFont = headingFont(size: 25)
     static let workspaceHeadingFont = headingFont(size: 20)
     static let narrowWorkspaceHeadingFont = headingFont(size: 18)
@@ -525,7 +544,7 @@ class TavernButton: NSButton {
     }
 
     private func updateRenderedTitle() {
-        renderedTitle = NSAttributedString(string: title, attributes: titleAttributes)
+        renderedTitle = TavernAppearance.navigationTitle(title, attributes: titleAttributes)
         renderedTitleHeight = ceil(renderedTitle.size().height)
     }
 

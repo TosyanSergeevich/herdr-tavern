@@ -28,7 +28,7 @@ import Foundation
         let fields: [String: [String]] = [
             "workspaces": ["workspace_id", "label"], "tabs": ["tab_id", "workspace_id", "label"],
             "panes": ["pane_id", "label", "foreground_cwd", "cwd"],
-            "agents": ["pane_id", "workspace_id", "tab_id", "display_agent", "agent", "name", "agent_status"]
+            "agents": ["pane_id", "workspace_id", "tab_id", "display_agent", "agent", "name", "agent_status", "title", "terminal_title", "terminal_title_stripped"]
         ]
         for (collection, names) in fields {
             for field in names {
@@ -42,6 +42,12 @@ import Foundation
             precondition(TavernNavigationPresentation(snapshot: changed) != baseline, "Focus change lost: \(field)")
         }
         print("PASS: row order, displayed values and focused IDs affect equality")
+        var renamed = snapshot, renamedTabs = objects(snapshot["tabs"])
+        renamedTabs[0]["custom_label"] = true
+        renamed["tabs"] = renamedTabs
+        precondition(TavernNavigationPresentation(snapshot: renamed) != baseline,
+                     "A manual name matching the old automatic label must still refresh navigation")
+        print("PASS: switching from automatic to manual naming invalidates navigation")
         let missing: [String: Any] = ["workspaces": [["workspace_id": "w"]]]
         let nulls: [String: Any] = ["workspaces": [["workspace_id": "w", "label": NSNull()]], "tabs": NSNull(), "focused_pane_id": NSNull()]
         precondition(TavernNavigationPresentation(snapshot: missing) == TavernNavigationPresentation(snapshot: nulls))

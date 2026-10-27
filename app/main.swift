@@ -88,6 +88,9 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     private var navigationTab = ""
     private var navigationTabViewportWidth: CGFloat = 0
     private var snapshot: [String: Any] = [:]
+    private var agentTitles = AgentTitles(snapshot: [:])
+    private var titleUpdates = AgentTitleUpdates()
+    private var titleFeed: AgentTitleFeed?
     private var pendingSnapshot: (snapshot: [String: Any], presentation: TavernNavigationPresentation)?
     private var connection: RustConnection?
     private var options: LaunchOptions?
@@ -733,6 +736,8 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         let agentCounts = allAgents.reduce(into: [String: Int]()) { $0[string($1["workspace_id"]), default: 0] += 1 }
         let panesByID = Dictionary(uniqueKeysWithValues: objects(snapshot["panes"]).map { (string($0["pane_id"]), $0) })
         let tabsByID = Dictionary(uniqueKeysWithValues: objects(snapshot["tabs"]).map { (string($0["tab_id"]), $0) })
+        let titles = AgentTitles(snapshot: snapshot, updates: titleUpdates)
+        agentTitles = titles
         let chainCount = agents.indices.dropFirst().reduce(0) { count, index in
             let tabID = string(agents[index]["tab_id"])
             return count + (!tabID.isEmpty && tabID == string(agents[index - 1]["tab_id"]) ? 1 : 0)
@@ -769,9 +774,9 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             let connected = !tabID.isEmpty && tabID == previousTab
             if !previousFrame.isEmpty { top -= connected ? AgentChainView.extraGap : AgentChainView.groupGap }
             let paneRow = panesByID[id], tabRow = tabsByID[string(agent["tab_id"])]
-            let tabTitle = string(tabRow?["label"])
+            let tabTitle = tabRow.map { titles.tabTitle($0) } ?? ""
             let agentType = [string(agent["display_agent"]), string(agent["agent"]), string(agent["name"]), L("shell.agent")].first(where: { !$0.isEmpty })!
-            let title = [string(paneRow?["label"]), tabTitle, string(agent["name"]), agentType].first(where: { !$0.isEmpty })!
+            let title = titles.cardTitle(agent: agent, pane: paneRow, fallback: agentType)
             let cwd = [string(paneRow?["foreground_cwd"]), string(paneRow?["cwd"])].first(where: { !$0.isEmpty }) ?? ""
             let shortPath = (cwd as NSString).abbreviatingWithTildeInPath
             let context = cwd.isEmpty ? L("shell.directory.unknown") : shortPath == "~" ? L("shell.directory.home") : shortPath
@@ -814,11 +819,11 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         var selected: NavigationButton?
         let tabs = focusedTabs()
         for row in tabs {
-            let id = string(row["tab_id"]), title = string(row["label"])
-            let label = title.isEmpty ? id : title
-            let width = min(190, max(100, ceil((label as NSString).size(withAttributes: [.font: TavernAppearance.bodyFont]).width) + 52))
+            let id = string(row["tab_id"]), title = titles.tabTitle(row)
+            let width = min(190, max(100, ceil(TavernAppearance.navigationTitle(title, attributes: [.font: TavernAppearance.bodyFont]).size().width) + 52))
             let rect = NSRect(x: x, y: 0, width: width, height: 38)
-            let item = button(title.isEmpty ? id : title, action: "tab.focus", target: id, frame: rect, parent: tabbar, buttons: &tabButtons, appearing: &appearing, selected: id == tab)
+            let item = button(title, action: "tab.focus", target: id, frame: rect, parent: tabbar, buttons: &tabButtons, appearing: &appearing, selected: id == tab)
+            item.toolTip = title
             if id == tab { selected = item }; x += width + 2
         }
         retireButtons(&tabButtons, keeping: Set(tabs.lazy.map { NavigationKey(action: "tab.focus", target: string($0["tab_id"])) }))
@@ -866,8 +871,14 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         let label = string(objects(snapshot["panes"]).first(where: { string($0["pane_id"]) == id })?["label"])
         let workspace = objects(snapshot["workspaces"]).first { string($0["workspace_id"]) == string(snapshot["focused_workspace_id"]) }
         let tab = objects(snapshot["tabs"]).first { string($0["tab_id"]) == string(snapshot["focused_tab_id"]) }
-        let workspaceTitle = string(workspace?["label"]), tabTitle = string(tab?["label"])
-        status.stringValue = L("shell.connection.ready", workspaceTitle.isEmpty ? string(snapshot["focused_workspace_id"]) : workspaceTitle, tabTitle.isEmpty ? string(snapshot["focused_tab_id"]) : tabTitle, label.isEmpty ? "" : "  │  " + label)
+        let workspaceTitle = string(workspace?["label"])
+        let tabTitle = tab.map { agentTitles.tabTitle($0) } ?? ""
+        let statusText = L("shell.connection.ready", workspaceTitle.isEmpty ? string(snapshot["focused_workspace_id"]) : workspaceTitle,
+                           tabTitle.isEmpty ? string(snapshot["focused_tab_id"]) : tabTitle, label.isEmpty ? "" : "  │  " + label)
+        if status.stringValue != statusText {
+            status.attributedStringValue = TavernAppearance.navigationTitle(statusText,
+                attributes: [.font: TavernAppearance.statusFont, .foregroundColor: TavernAppearance.secondary])
+        }
         status.toolTip = L("shell.connection.details", string(snapshot["focused_workspace_id"]), string(snapshot["focused_tab_id"]), id, label)
     }
     private func error(_ message: String) {
@@ -904,6 +915,8 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         guard let options, !connecting else { return }
         generation += 1; let epoch = generation
         connection?.close(); connection = nil
+        titleFeed?.close(); titleFeed = nil
+        titleUpdates = AgentTitleUpdates()
         requests.removeAll(); inFlight = nil; requestTimeout?.invalidate(); requestTimeout = nil
         pendingSnapshot = nil
         snapshot = [:]; surface.clear(); popupSurface.clear(); popupContainer.isHidden = true; surface.isHidden = true
@@ -914,11 +927,22 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
                 try options.ensureServer()
-                let pointer = try RustConnection.open(path: options.socketPath, cols: cols, rows: rows,
+                let feedResult = Result { try AgentTitleFeed.open(path: options.publicSocketPath) }
+                let pointer: OpaquePointer
+                do {
+                    pointer = try RustConnection.open(path: options.socketPath, cols: cols, rows: rows,
                                                       cellWidth: cellWidth, cellHeight: cellHeight)
+                } catch {
+                    if case .success(let feed) = feedResult { tavern_title_feed_close(feed); tavern_title_feed_free(feed) }
+                    throw error
+                }
                 DispatchQueue.main.async {
                     guard let self, self.generation == epoch, !self.terminated else {
-                        DispatchQueue.global().async { tavern_client_close(pointer); tavern_client_free(pointer) }; return
+                        DispatchQueue.global().async {
+                            tavern_client_close(pointer); tavern_client_free(pointer)
+                            if case .success(let feed) = feedResult { tavern_title_feed_close(feed); tavern_title_feed_free(feed) }
+                        }
+                        return
                     }
                     self.connection = RustConnection(pointer: pointer) { [weak self] result in
                         guard let self, self.generation == epoch, !self.terminated else { return }
@@ -936,6 +960,24 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
                     self.rebuildNavigation()
                     self.send(["type":"focus", "focused": self.window.isKeyWindow])
                     self.soundPlayer.play(.connected)
+                    switch feedResult {
+                    case .success(let feed):
+                        self.titleFeed = AgentTitleFeed(pointer: feed) { [weak self] result in
+                            guard let self, self.generation == epoch, self.attached,
+                                  self.titleFeed != nil, !self.terminated else { return }
+                            switch result {
+                            case .success(let event):
+                                if self.titleUpdates.consume(event: event),
+                                   AgentTitles(snapshot: self.snapshot, updates: self.titleUpdates) != self.agentTitles {
+                                    self.rebuildNavigation()
+                                }
+                            case .failure(let failure):
+                                self.localizedError { L("shell.error.titleUpdates", failure.localizedDescription) }
+                            }
+                        }
+                    case .failure(let failure):
+                        self.localizedError { L("shell.error.titleUpdates", failure.localizedDescription) }
+                    }
                 }
             } catch {
                 DispatchQueue.main.async {
@@ -948,6 +990,7 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     private func disconnect(_ message: String) { disconnect { message } }
     private func disconnect(_ message: @escaping () -> String) {
         attached = false; connecting = false; connection?.close(); connection = nil
+        titleFeed?.close(); titleFeed = nil
         paneGripLayoutKey = nil
         surface.cancelLinkHover(); popupSurface.cancelLinkHover()
         surface.commandKeybindings.update(commands: [], prefixes: [], context: "")
@@ -1030,6 +1073,8 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             if !oldBoot.isEmpty && oldBoot != newBoot {
                 requests.removeAll(); inFlight = nil; requestTimeout?.invalidate(); requestTimeout = nil; surface.clear()
                 snapshot = [:]
+                titleFeed?.close(); titleFeed = nil
+                titleUpdates = AgentTitleUpdates()
                 navigationPresentation = nil; pendingSnapshot = nil; paneGripLayoutKey = nil
                 localizedError { L("shell.error.serverRestarted") }
             }
@@ -1214,7 +1259,7 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         case "workspace.focus": request(action, ["workspace_id":target])
         case "workspace.create": createWorkspace()
         case "tab.focus": request(action, ["tab_id":target])
-        case "tab.create": request(action, ["workspace_id":workspace,"focus":true,"label":L("shell.tab.new"),"env":terminalLaunchEnvironment])
+        case "tab.create": request(action, ["workspace_id":workspace,"focus":true,"env":terminalLaunchEnvironment])
         case "tab.rename", "tab.close": editOrClose(action, target: tab)
         case "pane.rename", "pane.close": editOrClose(action, target: pane)
         case "tab.move.left", "tab.move.right":
@@ -1276,7 +1321,7 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         if lastWorkspaceTab {
             alert.warningText += L("shell.tab.close.last")
         }
-        if isPane && !closing { alert.informativeText += "\n" + L("shell.pane.rename.help") }
+        if !closing { alert.informativeText += "\n" + L(isPane ? "shell.pane.rename.help" : "shell.tab.rename.help") }
         var field: NSTextField?
         if closing {
             alert.alertStyle = .warning
@@ -1285,7 +1330,9 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         }
         else {
             alert.addButton(withTitle: L("shell.save")); alert.addButton(withTitle: L("shell.cancel"))
-            let text = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24)); text.stringValue = isPane ? originalLabel : label; text.setAccessibilityLabel(L("shell.name"))
+            let text = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+            text.stringValue = isPane || original["custom_label"] as? Bool == true ? originalLabel : ""
+            text.setAccessibilityLabel(L("shell.name"))
             text.font = TavernAppearance.controlFont
             field = text; alert.accessoryView = text
         }
@@ -1298,7 +1345,7 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
                 dialog.buttons[0].title = L("shell.cancel")
                 dialog.buttons[1].title = isPane ? L("shell.pane.close") : L("shell.tab.close")
             } else {
-                if isPane { dialog.informativeText += "\n" + L("shell.pane.rename.help") }
+                dialog.informativeText += "\n" + L(isPane ? "shell.pane.rename.help" : "shell.tab.rename.help")
                 dialog.buttons[0].title = L("shell.save")
                 dialog.buttons[1].title = L("shell.cancel")
                 field?.setAccessibilityLabel(L("shell.name"))
@@ -1311,17 +1358,7 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             }
             var params: [String: Any] = [key:target]
             if let field { params["label"] = field.stringValue }
-            if isPane, !closing, let field {
-                let newLabel = field.stringValue
-                self.request(action, params) { [weak self] _ in
-                    guard let self, self.attached, self.generation == epoch,
-                          boot == string(self.snapshot["boot_id"]),
-                          let pane = objects(self.snapshot["panes"]).first(where: { string($0["pane_id"]) == target }) else { return }
-                    let tabID = string(pane["tab_id"])
-                    guard objects(self.snapshot["tabs"]).contains(where: { string($0["tab_id"]) == tabID }) else { return }
-                    self.request("tab.rename", ["tab_id": tabID, "label": newLabel])
-                }
-            } else { self.request(action, params) }
+            self.request(action, params)
             self.window.makeFirstResponder(self.surface)
         }
         if let field { window.attachedSheet?.makeFirstResponder(field) }
@@ -1329,7 +1366,7 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     private func movePane(_ action: String, pane: String, workspace: String) {
         guard !pane.isEmpty, !publicRequestBusy else { return }
         let boot = string(snapshot["boot_id"]), epoch = generation
-        let destination: [String: Any] = action.hasSuffix("tab") ? ["type":"new_tab","workspace_id":workspace,"label":L("shell.pane.moved")] : ["type":"new_workspace","label":L("shell.workspace.new")]
+        let destination: [String: Any] = action.hasSuffix("tab") ? ["type":"new_tab","workspace_id":workspace] : ["type":"new_workspace","label":L("shell.workspace.new")]
         let alert = TavernDialog(); alert.messageText = L("shell.pane.move.question")
         alert.informativeText = action.hasSuffix("tab") ? L("shell.pane.move.tab.message", pane) : L("shell.pane.move.workspace.message", pane)
         alert.addButton(withTitle: L("shell.move")); alert.addButton(withTitle: L("shell.cancel"))
@@ -1510,6 +1547,7 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         soundPlayer.stop()
         requestTimeout?.invalidate(); requests.removeAll(); inFlight = nil
         connection?.close(); connection = nil
+        titleFeed?.close(); titleFeed = nil
     }
 }
 

@@ -5,6 +5,7 @@ mod command;
 mod config;
 mod event;
 mod localization;
+mod title_feed;
 mod transport;
 
 pub use client::TavernClient;
@@ -16,6 +17,7 @@ use std::{
     ptr,
     time::Duration,
 };
+pub use title_feed::TavernTitleFeed;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -119,6 +121,68 @@ unsafe fn boundary<T>(
 #[no_mangle]
 pub extern "C" fn tavern_set_language(language: u32) {
     localization::set_language(language);
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn tavern_title_feed_open(
+    socket_path: *const c_char,
+    error: *mut *mut c_char,
+) -> *mut TavernTitleFeed {
+    boundary(error, ptr::null_mut(), || {
+        Ok(Box::into_raw(Box::new(TavernTitleFeed::open(path(
+            socket_path,
+        )?)?)))
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn tavern_title_feed_next(
+    feed: *mut TavernTitleFeed,
+    timeout_ms: u32,
+    out_json: *mut *mut c_char,
+    error: *mut *mut c_char,
+) -> i32 {
+    if !out_json.is_null() {
+        *out_json = ptr::null_mut();
+    }
+    boundary(error, -1, || {
+        let feed = feed
+            .as_ref()
+            .ok_or(text("Missing title feed", "Отсутствует поток заголовков"))?;
+        if out_json.is_null() {
+            return Err(text(
+                "Missing title event output",
+                "Отсутствует output события заголовка",
+            )
+            .into());
+        }
+        match feed.next(Duration::from_millis(u64::from(timeout_ms.min(60000))))? {
+            title_feed::NextTitle::Event(json) => {
+                *out_json = json.into_raw();
+                Ok(1)
+            }
+            title_feed::NextTitle::Timeout => Ok(0),
+            title_feed::NextTitle::Closed => Ok(2),
+        }
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn tavern_title_feed_close(feed: *mut TavernTitleFeed) {
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if let Some(feed) = feed.as_ref() {
+            feed.close();
+        }
+    }));
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn tavern_title_feed_free(feed: *mut TavernTitleFeed) {
+    let _ = catch_unwind(AssertUnwindSafe(|| {
+        if !feed.is_null() {
+            drop(Box::from_raw(feed));
+        }
+    }));
 }
 
 #[no_mangle]
