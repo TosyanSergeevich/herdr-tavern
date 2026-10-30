@@ -1,4 +1,6 @@
 "settings.title" = "Настройки";
+"settings.animations" = "Анимации";
+"settings.animations.hint" = "Все анимации интерфейса. «Уменьшение движения» в macOS имеет приоритет.";
 "settings.sounds" = "Звуки";
 "settings.agents" = "Агенты";
 "settings.terminal" = "Терминал";

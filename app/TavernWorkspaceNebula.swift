@@ -238,6 +238,7 @@ final class TavernWorkspaceNebulaView: NSView, MTKViewDelegate {
         metalView.delegate = self
         addSubview(metalView)
         let center = NotificationCenter.default
+        observers.append(center.addObserver(forName: .tavernMotionDidChange, object: nil, queue: .main) { [weak self] _ in self?.refresh() })
         for name in [NSApplication.didHideNotification, NSApplication.didUnhideNotification] {
             observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in self?.refresh() })
         }
@@ -305,9 +306,9 @@ final class TavernWorkspaceNebulaView: NSView, MTKViewDelegate {
     private func refresh() {
         let shown = visible
         TavernWorkspaceNebulaClock.shared.setActive(self,
-            active: shown && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
+            active: shown && TavernMotion.enabled)
         if shown {
-            seconds = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : TavernWorkspaceNebulaClock.shared.seconds
+            seconds = TavernMotion.enabled ? TavernWorkspaceNebulaClock.shared.seconds : 0
             if agentTint.w > 0 {
                 seconds = (seconds + phaseOffset).truncatingRemainder(dividingBy: 10)
             }

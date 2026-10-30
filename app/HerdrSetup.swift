@@ -53,7 +53,7 @@ final class HerdrSetupController {
         progress.informativeText = L("installer.progress.message", installer.release.version)
         progress.addButton(withTitle: L("core.dialog.cancel"))
             .setAccessibilityIdentifier("herdr.install.cancel")
-        let spinner = NSProgressIndicator(frame: NSRect(x: 0, y: 0, width: 28, height: 28))
+        let spinner = TavernProgressIndicator(frame: NSRect(x: 0, y: 0, width: 28, height: 28))
         spinner.style = .spinning
         spinner.setAccessibilityIdentifier("herdr.install.progress")
         spinner.setAccessibilityLabel(L("installer.progress.title"))

@@ -1,4 +1,6 @@
 "settings.title" = "Settings";
+"settings.animations" = "Animations";
+"settings.animations.hint" = "All interface animations. Reduce Motion in macOS takes priority.";
 "settings.sounds" = "Sounds";
 "settings.agents" = "Agents";
 "settings.terminal" = "Terminal";

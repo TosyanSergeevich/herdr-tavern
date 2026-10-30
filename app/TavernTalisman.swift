@@ -208,7 +208,7 @@ final class TavernTalismanView: NSView, TavernEffectsClockClient {
 #if TAVERN_RENDER_TESTING
         if let policy = renderingTestPolicy { return policy.reduceMotion }
 #endif
-        return NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        return !TavernMotion.enabled
     }
     private var backingScale: CGFloat {
 #if TAVERN_RENDER_TESTING
@@ -440,7 +440,7 @@ final class TavernRuneParticlesView: NSView, TavernEffectsClockClient {
 #if TAVERN_RENDER_TESTING
         if let policy = renderingTestPolicy { return policy.reduceMotion }
 #endif
-        return NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        return !TavernMotion.enabled
     }
     fileprivate var effectsVisible: Bool {
 #if TAVERN_RENDER_TESTING
@@ -657,6 +657,9 @@ private final class TavernEffectsClock {
     private var observers: [NSObjectProtocol] = []
     private var workspaceObserver: NSObjectProtocol?
     private init() {
+        observers.append(NotificationCenter.default.addObserver(forName: .tavernMotionDidChange, object: nil, queue: .main) {
+            [weak self] _ in self?.refresh()
+        })
         for name in [NSWindow.didChangeOcclusionStateNotification, NSWindow.didMiniaturizeNotification,
                      NSWindow.didDeminiaturizeNotification, NSWindow.willCloseNotification,
                      NSApplication.didHideNotification, NSApplication.didUnhideNotification] {
@@ -691,7 +694,7 @@ private final class TavernEffectsClock {
     func refresh() {
         precondition(Thread.isMainThread)
         entries.removeAll { $0.client == nil }
-        let reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let reduced = !TavernMotion.enabled
         var active = false
         for entry in entries {
             guard let client = entry.client else { continue }

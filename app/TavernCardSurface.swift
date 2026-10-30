@@ -82,26 +82,31 @@ private final class TavernCardClock {
     private struct Entry { weak var view: TavernCardSurfaceView? }
     private var views: [Entry] = []
     private var timer: Timer?
+    private var interval: TimeInterval = 0
 
     func setActive(_ view: TavernCardSurfaceView, _ active: Bool) {
         views.removeAll { $0.view == nil || $0.view === view }
         if active { views.append(Entry(view: view)) }
-        if views.isEmpty {
-            timer?.invalidate()
-            timer = nil
-        } else if timer == nil {
-            let timer = Timer(timeInterval: 1.0 / 30.0, repeats: true) { [weak self] _ in
-                guard let self else { return }
-                for entry in self.views { entry.view?.clockTick() }
-                self.views.removeAll { $0.view == nil }
-                if self.views.isEmpty {
-                    self.timer?.invalidate()
-                    self.timer = nil
-                }
-            }
-            RunLoop.main.add(timer, forMode: .common)
-            self.timer = timer
+        updateTimer()
+    }
+
+    private func updateTimer() {
+        let next: TimeInterval = views.isEmpty ? 0 :
+            (views.contains { $0.view?.bookmarkAnimating == true } ? 1.0 / 60 : 1.0 / 30)
+        guard interval != next else { return }
+        timer?.invalidate()
+        timer = nil
+        interval = next
+        guard next > 0 else { return }
+        let timer = Timer(timeInterval: next, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            // clockTick may unregister a hidden view.
+            for entry in self.views { entry.view?.clockTick() }
+            self.views.removeAll { $0.view == nil }
+            self.updateTimer()
         }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
     }
 }
 /// Decorative only: the owning native button retains hit testing, text and accessibility.
@@ -131,11 +136,16 @@ final class TavernCardSurfaceView: NSView, MTKViewDelegate {
     private var clock: Double = 0
     private var previousTime: CFTimeInterval?
     private var clockActive = false
+    private var fastClock = false
     private var geometrySize = CGSize.zero
+    private var bookmark = TavernBookmarkMotion()
+    private var animatedMaps: TavernCardMaps?
+    fileprivate var bookmarkAnimating: Bool { bookmark.isAnimating }
     private var geometryPixels = CGSize.zero
     #if TAVERN_RENDER_TESTING
     var testingVisibilityPolicy: (() -> Bool)?
     var testingReduceMotionPolicy: (() -> Bool)?
+    var testingBookmarkTime: CFTimeInterval?
     var onSubmittedFrame: ((TavernCardMaterialKey, CGRect, CGSize) -> Void)?
     // Copied into each immutable job on main; the gate runs only on the readback worker.
     var snapshotCompletionGate: (() -> Void)?
@@ -159,6 +169,13 @@ final class TavernCardSurfaceView: NSView, MTKViewDelegate {
         geometryChanged()
     }
     #endif
+
+    private var bookmarkTime: CFTimeInterval {
+        #if TAVERN_RENDER_TESTING
+        if let testingBookmarkTime { return testingBookmarkTime }
+        #endif
+        return CACurrentMediaTime()
+    }
 
     static func prepareResources(completion: @escaping (Result<Void, Error>) -> Void) {
         TavernCardRenderer.prepareResources(completion: completion)
@@ -195,6 +212,8 @@ final class TavernCardSurfaceView: NSView, MTKViewDelegate {
                 self?.requestFrame()
             })
         }
+        observers.append(center.addObserver(forName: .tavernMotionDidChange,
+            object: nil, queue: .main) { [weak self] _ in self?.requestFrame() })
         observers.append(NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
             object: nil, queue: .main) { [weak self] _ in self?.requestFrame() })
@@ -216,6 +235,7 @@ final class TavernCardSurfaceView: NSView, MTKViewDelegate {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
     func configure(seed: UInt64, construction: TavernPlankConstruction, selected: Bool) {
+        bookmark.select(selected, at: bookmarkTime, animated: visible && !reducedMotion)
         let changed = self.seed != seed || self.construction != construction || self.selected != selected
         guard changed || maps == nil else { return }
         if changed {
@@ -286,7 +306,7 @@ final class TavernCardSurfaceView: NSView, MTKViewDelegate {
         #if TAVERN_RENDER_TESTING
         if let testingReduceMotionPolicy { return testingReduceMotionPolicy() }
         #endif
-        return NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        return !TavernMotion.enabled
     }
 
     private func watchClipView() {
@@ -308,7 +328,7 @@ final class TavernCardSurfaceView: NSView, MTKViewDelegate {
         guard width > 0, height > 0, bounds.width > 0, bounds.height > 0 else { return nil }
         return TavernCardMaterialKey(plank: TavernPlankKey(seed: seed, construction: construction,
             pixelWidth: width, pixelHeight: height, pointWidth: bounds.width, pointHeight: bounds.height),
-            selected: selected)
+            selected: selected && !bookmark.isAnimating)
     }
 
     private func prefetch(_ key: TavernCardMaterialKey) {
@@ -378,9 +398,17 @@ final class TavernCardSurfaceView: NSView, MTKViewDelegate {
 
     private func updateClock() {
         let shown = visible
+        let wasAnimating = bookmark.isAnimating
+        if !shown || reducedMotion { bookmark.finish() }
+        else { bookmark.advance(at: bookmarkTime) }
+        if wasAnimating && !bookmark.isAnimating {
+            animatedMaps = nil
+            visibilityShadow = nil
+        }
         let run = shown && !reducedMotion
-        if clockActive != run {
+        if clockActive != run || fastClock != bookmark.isAnimating {
             clockActive = run
+            fastClock = bookmark.isAnimating
             TavernCardClock.shared.setActive(self, run)
         }
         if !run { previousTime = nil }
@@ -475,28 +503,34 @@ final class TavernCardSurfaceView: NSView, MTKViewDelegate {
         return uniforms
     }
 
-    private func encode(maps: TavernCardMaps, key: TavernCardMaterialKey,
+    private func encode(maps baseMaps: TavernCardMaps, key: TavernCardMaterialKey,
                         uniforms captured: TavernCardUniforms,
                         pass: MTLRenderPassDescriptor, command: MTLCommandBuffer) throws -> TavernCardShadow {
         guard let target = pass.colorAttachments[0].texture else {
             throw TavernCardSnapshotError.unavailable
         }
+        let maps = try bookmark.isAnimating
+            ? composeBookmark(base: baseMaps, geometry: captured.geometry, command: command) : baseMaps
         let shadowKey = TavernCardShadowKey(material: key, pixelWidth: target.width,
             pixelHeight: target.height, geometry: captured.geometry, lamp: captured.lamp)
         let capturedShadow: TavernCardShadow
-        if let shadow = visibilityShadow, shadow.key == shadowKey {
+        if let shadow = visibilityShadow, shadow.key == shadowKey, !bookmark.isAnimating {
             capturedShadow = shadow
         } else {
-            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-                pixelFormat: .r32Float, width: target.width, height: target.height, mipmapped: false)
-            descriptor.storageMode = .private
-            descriptor.usage = [.renderTarget, .shaderRead]
-            guard let texture = renderer.device.makeTexture(descriptor: descriptor) else {
-                throw TavernCardSnapshotError.unavailable
+            if let shadow = visibilityShadow, shadow.key == shadowKey {
+                capturedShadow = shadow
+            } else {
+                let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                    pixelFormat: .r32Float, width: target.width, height: target.height, mipmapped: false)
+                descriptor.storageMode = .private
+                descriptor.usage = [.renderTarget, .shaderRead]
+                guard let texture = renderer.device.makeTexture(descriptor: descriptor) else {
+                    throw TavernCardSnapshotError.unavailable
+                }
+                capturedShadow = TavernCardShadow(key: shadowKey, texture: texture)
             }
-            capturedShadow = TavernCardShadow(key: shadowKey, texture: texture)
             let shadowPass = MTLRenderPassDescriptor()
-            shadowPass.colorAttachments[0].texture = texture
+            shadowPass.colorAttachments[0].texture = capturedShadow.texture
             shadowPass.colorAttachments[0].loadAction = .dontCare
             shadowPass.colorAttachments[0].storeAction = .store
             guard let encoder = command.makeRenderCommandEncoder(descriptor: shadowPass) else {
@@ -527,6 +561,49 @@ final class TavernCardSurfaceView: NSView, MTKViewDelegate {
             withExtendedLifetime((maps, capturedShadow)) {}
         }
         return capturedShadow
+    }
+
+    /// Transient MRT maps keep the existing lighting/shadow shaders and snapshot path identical.
+    /// Textures are reused for the short transition, never baked on the CPU per frame.
+    private func composeBookmark(base: TavernCardMaps, geometry: SIMD4<Float>,
+                                 command: MTLCommandBuffer) throws -> TavernCardMaps {
+        let size = base.textures[0]
+        if animatedMaps?.textures[0].width != size.width || animatedMaps?.textures[0].height != size.height {
+            var textures: [MTLTexture] = []
+            for _ in 0..<4 {
+                let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm,
+                    width: size.width, height: size.height, mipmapped: false)
+                descriptor.storageMode = .private
+                descriptor.usage = [.renderTarget, .shaderRead]
+                guard let texture = renderer.device.makeTexture(descriptor: descriptor) else {
+                    throw TavernCardSnapshotError.unavailable
+                }
+                textures.append(texture)
+            }
+            animatedMaps = TavernCardMaps(textures)
+        }
+        let maps = animatedMaps!
+        let pass = MTLRenderPassDescriptor()
+        for index in 0..<4 {
+            pass.colorAttachments[index].texture = maps.textures[index]
+            pass.colorAttachments[index].loadAction = .dontCare
+            pass.colorAttachments[index].storeAction = .store
+        }
+        guard let encoder = command.makeRenderCommandEncoder(descriptor: pass) else {
+            throw TavernCardSnapshotError.encoder
+        }
+        let pose = bookmark.pose(at: bookmarkTime)
+        var uniforms = SIMD4(geometry.x, geometry.y, pose.offset, pose.bend)
+        encoder.setRenderPipelineState(renderer.bookmarkPipeline)
+        encoder.setFragmentBytes(&uniforms, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
+        for (index, texture) in base.textures.enumerated() { encoder.setFragmentTexture(texture, index: index) }
+        for (index, texture) in renderer.bookmarkTextures.enumerated() {
+            encoder.setFragmentTexture(texture, index: index + 4)
+        }
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        encoder.endEncoding()
+        command.addCompletedHandler { _ in withExtendedLifetime((base, maps)) {} }
+        return maps
     }
 
     private static let snapshotReadbackQueue = DispatchQueue(
@@ -733,6 +810,8 @@ final class TavernCardRenderer {
     let queue: MTLCommandQueue
     let pipeline: MTLRenderPipelineState
     let shadowPipeline: MTLRenderPipelineState
+    let bookmarkPipeline: MTLRenderPipelineState
+    private(set) var bookmarkTextures: [MTLTexture] = []
     let nebula: TavernWorkspaceNebulaResources
     private let cache = NSCache<TavernMaterialCacheKey<TavernCardMaterialKey>, TavernCardMaps>()
     private let plankCache = NSCache<TavernMaterialCacheKey<TavernPlankKey>, TavernPlankMaps>()
@@ -790,6 +869,11 @@ final class TavernCardRenderer {
         shadowDescriptor.fragmentFunction = library.makeFunction(name: "tavernCardShadowFragment")
         shadowDescriptor.colorAttachments[0].pixelFormat = .r32Float
         shadowPipeline = try device.makeRenderPipelineState(descriptor: shadowDescriptor)
+        let bookmarkDescriptor = MTLRenderPipelineDescriptor()
+        bookmarkDescriptor.vertexFunction = library.makeFunction(name: "tavernCardVertex")
+        bookmarkDescriptor.fragmentFunction = library.makeFunction(name: "tavernBookmarkMapsFragment")
+        for index in 0..<4 { bookmarkDescriptor.colorAttachments[index].pixelFormat = .rgba8Unorm }
+        bookmarkPipeline = try device.makeRenderPipelineState(descriptor: bookmarkDescriptor)
         cache.totalCostLimit = 96 * 1024 * 1024
         cache.countLimit = 72
         plankCache.totalCostLimit = 32 * 1024 * 1024
@@ -797,6 +881,21 @@ final class TavernCardRenderer {
         for suffix in ["", "-height", "-material"] { _ = try image("sprites/bookmark\(suffix)") }
         for kind in 0..<4 { _ = try bookmarkMap(kind: kind) }
         _ = try contactShadow()
+        for kind in 0..<5 {
+            let source = try kind == 4 ? contactShadow() : bookmarkMap(kind: kind)
+            let context = try TavernPlankMaterial.context(width: source.width, height: source.height)
+            context.draw(source, in: CGRect(x: 0, y: 0, width: source.width, height: source.height))
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm,
+                width: source.width, height: source.height, mipmapped: false)
+            descriptor.usage = .shaderRead
+            descriptor.storageMode = .shared
+            guard let texture = device.makeTexture(descriptor: descriptor), let data = context.data else {
+                throw TavernCardResourceError.invalid(L("core.card.textureUnavailable"))
+            }
+            texture.replace(region: MTLRegionMake2D(0, 0, source.width, source.height), mipmapLevel: 0,
+                withBytes: data, bytesPerRow: source.width * 4)
+            bookmarkTextures.append(texture)
+        }
     }
 
     private func activateMemoryPressureObservation() {

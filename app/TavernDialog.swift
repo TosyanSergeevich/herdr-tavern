@@ -300,6 +300,7 @@ final class TavernDialog: NSObject, NSWindowDelegate {
         let size = NSSize(width: width, height: bodyHeight + footerHeight + 12)
         let panel = TavernDialogPanel(contentRect: NSRect(origin: .zero, size: size),
                                       styleMask: [.borderless], backing: .buffered, defer: false)
+        TavernMotion.configureWindow(panel)
         panel.delegate = self
         panel.title = messageText
         panel.setAccessibilityLabel(messageText)

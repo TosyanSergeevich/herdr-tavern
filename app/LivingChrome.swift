@@ -584,10 +584,12 @@ private final class LivingChromeClock {
     private var timer: Timer?
     private var observers: [NSObjectProtocol] = []
     private var workspaceObserver: NSObjectProtocol?
-    private let epoch = ProcessInfo.processInfo.systemUptime
+    private var seconds: TimeInterval = 0
+    private var previous: TimeInterval?
 
     private init() {
         let center = NotificationCenter.default
+        observers.append(center.addObserver(forName: .tavernMotionDidChange, object: nil, queue: .main) { [weak self] _ in self?.refresh() })
         for name in [NSWindow.didChangeOcclusionStateNotification, NSWindow.didMiniaturizeNotification,
                      NSWindow.didDeminiaturizeNotification, NSWindow.willCloseNotification,
                      NSApplication.didHideNotification, NSApplication.didUnhideNotification] {
@@ -609,13 +611,15 @@ private final class LivingChromeClock {
     }
 
     func refresh() {
-        let reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let reduced = !TavernMotion.enabled
         let active = !NSApp.isHidden && views.contains { $0.view?.canAnimate == true }
         if reduced || !active {
             timer?.invalidate()
             timer = nil
+            previous = nil
             for entry in views { entry.view?.updateLight(time: 0, reducedMotion: true) }
         } else if timer == nil {
+            previous = ProcessInfo.processInfo.systemUptime
             let timer = Timer(timeInterval: 1.0 / 24.0, repeats: true) { [weak self] _ in self?.tick() }
             timer.tolerance = 0.012
             self.timer = timer
@@ -624,12 +628,14 @@ private final class LivingChromeClock {
     }
 
     private func tick() {
-        let time = ProcessInfo.processInfo.systemUptime - epoch
+        let now = ProcessInfo.processInfo.systemUptime
+        if let previous { seconds += min(0.1, max(0, now - previous)) }
+        previous = now
         var anyVisible = false
         for entry in views {
             guard let view = entry.view, view.canAnimate else { continue }
             anyVisible = true
-            view.updateLight(time: time, reducedMotion: false)
+            view.updateLight(time: seconds, reducedMotion: false)
         }
         if !anyVisible { refresh() }
     }

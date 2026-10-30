@@ -149,3 +149,63 @@ fragment float4 tavernCardFragment(CardVertex in [[stage_in]],
     colour = pow(max(colour, float3(0)), float3(1.0f / 2.2f));
     return float4(colour * source.a, source.a);
 }
+
+struct BookmarkMaps {
+    float4 albedo [[color(0)]];
+    float4 height [[color(1)]];
+    float4 normal [[color(2)]];
+    float4 material [[color(3)]];
+};
+
+float4 bookmarkSample(texture2d<float> map, float2 uv) {
+    if (any(uv < 0.0f) || any(uv > 1.0f)) return float4(0);
+    return map.sample(cardSampler, uv);
+}
+
+// Only runs during the short selection transition. The static path retains baked maps.
+fragment BookmarkMaps tavernBookmarkMapsFragment(CardVertex in [[stage_in]],
+    constant float4 &u [[buffer(0)]], // scene width/height, vertical offset, bend radians
+    texture2d<float> albedo [[texture(0)]], texture2d<float> heights [[texture(1)]],
+    texture2d<float> normals [[texture(2)]], texture2d<float> materials [[texture(3)]],
+    texture2d<float> cloth [[texture(4)]], texture2d<float> clothHeight [[texture(5)]],
+    texture2d<float> clothNormal [[texture(6)]], texture2d<float> clothMaterial [[texture(7)]],
+    texture2d<float> contact [[texture(8)]]) {
+    BookmarkMaps out;
+    out.albedo = albedo.sample(cardSampler, in.uv);
+    out.height = heights.sample(cardSampler, in.uv);
+    out.normal = normals.sample(cardSampler, in.uv);
+    out.material = materials.sample(cardSampler, in.uv);
+    float2 p = in.uv * u.xy;
+    // The mounting edge is hidden behind the top rim, not faded or stretched.
+    if (p.y < 4.0f) return out;
+    float t = (p.y - 4.0f - u.z) / 88.0f;
+    // Invert the arc-length-preserving centreline (small-angle expansion).
+    for (int i = 0; i < 2; ++i) {
+        float t2 = t * t, t4 = t2 * t2;
+        float f = t - u.w * u.w * t4 * t / 10.0f;
+        t -= (f - (p.y - 4.0f - u.z) / 88.0f) / max(.8f, 1.0f - .5f * u.w * u.w * t4);
+    }
+    float angle = u.w * t * t;
+    float x = p.x - (u.x - 74.0f - u.w * 88.0f * t * t * t / 3.0f);
+    float2 uv = float2((x + 8.0f) / 16.0f, t);
+    float4 c = bookmarkSample(cloth, uv);
+    float4 h = bookmarkSample(clothHeight, uv);
+    float4 n = bookmarkSample(clothNormal, uv);
+    float4 m = bookmarkSample(clothMaterial, uv);
+    if (n.a > .001f) {
+        float3 normal = n.rgb / n.a * 2.0f - 1.0f;
+        normal.xy = float2(cos(angle) * normal.x - sin(angle) * normal.y,
+                           sin(angle) * normal.x + cos(angle) * normal.y);
+        n.rgb = (normal * .5f + .5f) * n.a;
+    }
+    float2 shadowUV = float2((x + 18.0f) / 36.0f, (t * 88.0f + 9.0f) / 112.0f);
+    float shadow = bookmarkSample(contact, shadowUV).a;
+    if (p.x >= 5.0f && p.x <= u.x - 5.0f && p.y >= 5.0f && p.y <= u.y - 5.0f) {
+        out.albedo.rgb *= 1.0f - shadow;
+    }
+    out.albedo = c + out.albedo * (1.0f - c.a);
+    out.height = h + out.height * (1.0f - h.a);
+    out.normal = n + out.normal * (1.0f - n.a);
+    out.material = m + out.material * (1.0f - m.a);
+    return out;
+}

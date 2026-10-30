@@ -75,13 +75,18 @@ final class TavernSettingsWindowController: NSWindowController {
     private var languageUpdates: [() -> Void] = []
     private var languageObserver: NSObjectProtocol?
     private var sheetLanguageUpdate: (() -> Void)?
+    private let motionSettings: TavernMotionSettings
+    private let animationsSwitch = TavernSoundSwitch()
+    private let animationsHint = NSTextField(wrappingLabelWithString: "")
+    private var motionObserver: NSObjectProtocol?
 
     init(settings: TavernSoundSettings, player: TavernSoundPlayer, integrations: AgentIntegrationService,
          terminalSettings: TavernTerminalSettings, terminalFonts: TerminalFonts,
-         defaults: UserDefaults = .standard) {
+         defaults: UserDefaults = .standard, motionSettings: TavernMotionSettings = .shared) {
         self.settings = settings
         self.player = player
         self.defaults = defaults
+        self.motionSettings = motionSettings
         agentsView = AgentSettingsView(service: integrations)
         terminalView = TerminalSettingsView(settings: terminalSettings, fonts: terminalFonts)
         selectedSection = Section(rawValue: defaults.string(forKey: Self.sectionKey) ?? "") ?? .sounds
@@ -94,7 +99,7 @@ final class TavernSettingsWindowController: NSWindowController {
         window.minSize = NSSize(width: 800, height: 480)
         window.isReleasedWhenClosed = false
         window.tabbingMode = .disallowed
-        window.animationBehavior = .utilityWindow
+        window.animationBehavior = motionSettings.enabled ? .utilityWindow : .none
         window.backgroundColor = TavernAppearance.wood
         window.titlebarAppearsTransparent = true
         window.appearance = NSAppearance(named: .darkAqua)
@@ -106,12 +111,17 @@ final class TavernSettingsWindowController: NSWindowController {
         languageObserver = NotificationCenter.default.addObserver(forName: .tavernLanguageDidChange, object: nil, queue: nil) { [weak self] _ in
             self?.languageDidChange()
         }
+        motionObserver = NotificationCenter.default.addObserver(forName: .tavernMotionDidChange, object: motionSettings, queue: .main) {
+            [weak self] _ in self?.refreshMotionControls()
+        }
+        refreshMotionControls()
         window.center()
     }
 
     required init?(coder: NSCoder) { fatalError("TavernSettingsWindowController requires sound settings") }
     deinit {
         if let languageObserver { NotificationCenter.default.removeObserver(languageObserver) }
+        if let motionObserver { NotificationCenter.default.removeObserver(motionObserver) }
     }
 
     @objc private func changeLanguage(_ sender: NSPopUpButton) {
@@ -119,6 +129,21 @@ final class TavernSettingsWindowController: NSWindowController {
         guard sender.isEnabled, languages.indices.contains(sender.indexOfSelectedItem) else { return }
         TavernLocalization.shared.setLanguage(languages[sender.indexOfSelectedItem])
         player.play(.interfaceClick)
+    }
+
+    @objc private func changeAnimations(_ sender: NSButton) {
+        motionSettings.setAnimationsEnabled(sender.state == .on)
+        player.play(.interfaceClick)
+    }
+
+    private func refreshMotionControls() {
+        animationsSwitch.state = motionSettings.animationsEnabled ? .on : .off
+        animationsSwitch.setAccessibilityLabel(L("settings.animations"))
+        animationsSwitch.setAccessibilityValue(motionSettings.animationsEnabled ? 1 : 0)
+        animationsSwitch.toolTip = L("settings.animations.hint")
+        animationsHint.stringValue = L("settings.animations.hint")
+        detailsPopover.animates = motionSettings.enabled
+        window?.animationBehavior = motionSettings.enabled ? .utilityWindow : .none
     }
 
     private func languageDidChange() {
@@ -136,11 +161,14 @@ final class TavernSettingsWindowController: NSWindowController {
         languageUpdates.forEach { $0() }
         sheetLanguageUpdate?()
         refreshControls()
+        refreshMotionControls()
     }
 
     override func showWindow(_ sender: Any?) {
         let wasVisible = window?.isVisible == true
         refreshControls()
+        motionSettings.refresh()
+        refreshMotionControls()
         if selectedSection == .agents { agentsView.refresh() }
         terminalView.refresh()
         super.showWindow(sender)
@@ -235,6 +263,14 @@ final class TavernSettingsWindowController: NSWindowController {
         languagePicker.setAccessibilityIdentifier("settings.language")
         languagePicker.setAccessibilityLabel(L("settings.language"))
         addFullWidth(languagePicker, to: navigation)
+        addFullWidth(localizedLabel("settings.animations"), to: navigation)
+        animationsSwitch.target = self
+        animationsSwitch.action = #selector(changeAnimations(_:))
+        animationsSwitch.setAccessibilityIdentifier("settings.animations")
+        navigation.addArrangedSubview(animationsSwitch)
+        animationsHint.font = NSFont.systemFont(ofSize: 10)
+        animationsHint.textColor = TavernAppearance.text.withAlphaComponent(0.7)
+        addFullWidth(animationsHint, to: navigation)
         NSLayoutConstraint.activate([
             navigation.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 10),
             navigation.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -10),
@@ -351,7 +387,7 @@ final class TavernSettingsWindowController: NSWindowController {
         addFullWidth(footer, to: content)
 
         detailsPopover.behavior = .transient
-        detailsPopover.animates = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        detailsPopover.animates = motionSettings.enabled
     }
 
     private func eventRow(_ event: TavernSoundEvent, index: Int) -> NSView {
@@ -440,7 +476,7 @@ final class TavernSettingsWindowController: NSWindowController {
         panel.setAccessibilityIdentifier("soundSettings.event.\(event.rawValue).popover")
         detailsPopover.contentViewController = controller
         detailsPopover.contentSize = panel.fittingSize
-        detailsPopover.animates = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        detailsPopover.animates = motionSettings.enabled
         detailsPopover.show(relativeTo: sender.bounds, of: sender, preferredEdge: .minX)
     }
 
@@ -628,6 +664,7 @@ final class TavernSettingsWindowController: NSWindowController {
         refreshDetails()
         detailsPopover.close()
         let panel = NSOpenPanel()
+        TavernMotion.configureWindow(panel)
         panel.title = L("settings.sound.chooseTitle", event.title)
         panel.message = L("settings.sound.chooseMessage")
         panel.prompt = L("settings.choose")

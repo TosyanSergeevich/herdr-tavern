@@ -325,6 +325,7 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     private func buildWindow() {
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1080, height: 680),
                           styleMask: [.titled,.closable,.miniaturizable,.resizable], backing: .buffered, defer: false)
+        TavernMotion.configureWindow(window)
         window.title = "Herdr Tavern"; window.minSize = NSSize(width: 680, height: 400); window.delegate = self
         window.isReleasedWhenClosed = false
         window.appearance = NSAppearance(named: .darkAqua)

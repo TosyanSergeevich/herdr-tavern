@@ -10,6 +10,7 @@ final class AgentWelcomeWindowController: NSWindowController {
         let size = NSSize(width: 490, height: 280)
         let panel = TavernAgentWelcomePanel(contentRect: NSRect(origin: .zero, size: size),
                                             styleMask: [.borderless], backing: .buffered, defer: false)
+        TavernMotion.configureWindow(panel)
         panel.title = L("settings.welcome.title")
         panel.isReleasedWhenClosed = false
         panel.hidesOnDeactivate = false

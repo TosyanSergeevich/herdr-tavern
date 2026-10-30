@@ -307,6 +307,22 @@ final class TavernNavigationDrag {
         let revision: UInt64
     }
     private var imageCache: [CaptureKey: NSImage] = [:]
+    private var motionObserver: NSObjectProtocol?
+
+    init() {
+        motionObserver = NotificationCenter.default.addObserver(forName: .tavernMotionDidChange, object: nil, queue: .main) {
+            [weak self] _ in
+            guard let self, !TavernMotion.enabled else { return }
+            self.animation?.invalidate()
+            self.animation = nil
+            if self.overlay?.returning == true { self.finish() }
+            else { self.overlay?.stopFlight() }
+        }
+    }
+
+    deinit {
+        if let motionObserver { NotificationCenter.default.removeObserver(motionObserver) }
+    }
     #if TAVERN_RENDER_TESTING
     var requestImageForTesting: ((NSView, @escaping (Result<NSImage, Error>) -> Void) -> Void)?
     var nextEventForTesting: (() -> NSEvent?)?

@@ -57,7 +57,7 @@ private final class AgentIntegrationRow: NSView {
     private let message = AgentSettingsStyle.label("")
     private let actionButton: TavernButton
     private let moreButton: TavernButton
-    private let spinner = NSProgressIndicator()
+    private let spinner = TavernProgressIndicator()
 
     init(target: String) {
         let prefix = "agentSettings.agent.\(target)"
@@ -170,7 +170,7 @@ final class AgentSettingsView: NSView {
     private let service: AgentIntegrationService
     private let refreshButton: TavernButton
     private let disclosure = NSButton(title: L("settings.integration.otherAgents"), target: nil, action: nil)
-    private let progress = NSProgressIndicator()
+    private let progress = TavernProgressIndicator()
     private let globalMessage = AgentSettingsStyle.label("")
     private let emptyMessage = AgentSettingsStyle.label(L("settings.integration.checking"))
     private let primaryRows = AgentSettingsStyle.stack(spacing: 0)
@@ -523,6 +523,7 @@ final class AgentSettingsView: NSView {
         guard let agent = agent(for: sender), let window else { return }
         onInteraction?()
         let panel = NSOpenPanel()
+        TavernMotion.configureWindow(panel)
         panel.title = L("settings.integration.executableTitle", agent.label)
         panel.message = L("settings.integration.executableMessage", agent.command)
         panel.prompt = L("settings.choose")
@@ -549,6 +550,7 @@ final class AgentSettingsView: NSView {
         guard let agent = agent(for: sender), agent.supportsProfileDirectory, let window else { return }
         onInteraction?()
         let panel = NSOpenPanel()
+        TavernMotion.configureWindow(panel)
         panel.title = L("settings.integration.profileTitle", agent.label)
         panel.message = agent.profileDirectoryHint + " " + L("settings.integration.profileMessage")
         panel.prompt = L("settings.integration.profilePrompt")
