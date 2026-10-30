@@ -10,7 +10,13 @@ import Foundation
         closedAgentsArePruned()
         notificationBeforeSnapshot()
         newAgentCanNeedAttention()
-        print("Пройдено 8 проверок состояния непрочитанного")
+        workspaceAttentionPrioritizesAllAgents()
+        workspaceBlockedUsesCurrentSnapshot()
+        workspaceSelectionDoesNotReadOtherAgents()
+        workspaceProjectionFollowsAgentMoveAndRemoval()
+        workspaceProjectionDoesNotInheritPreviousBoot()
+        workspaceProjectionIgnoresEmptyIdentities()
+        print("Пройдено 14 проверок состояния непрочитанного")
     }
 
     static func baselineDoesNotReplayHistory() {
@@ -90,5 +96,78 @@ import Foundation
         precondition(tracker.marks["a"] == .reply, "Первый снимок не должен потерять уже полученное событие")
         tracker.synchronize(bootID: "boot", statuses: ["a": "done"], viewedPane: "a")
         precondition(tracker.marks["a"] == nil)
+    }
+
+    static func agent(_ paneID: String, _ workspaceID: String, _ status: String = "idle") -> [String: Any] {
+        ["pane_id": paneID, "workspace_id": workspaceID, "agent_status": status]
+    }
+
+    static func workspaceAttentionPrioritizesAllAgents() {
+        var tracker = AgentUnreadTracker()
+        tracker.record(.reply, paneID: "a", bootID: "boot", viewedPane: nil)
+        tracker.record(.attention, paneID: "b", bootID: "boot", viewedPane: nil)
+        tracker.record(.reply, paneID: "c", bootID: "boot", viewedPane: nil)
+        let agents = [agent("a", "one"), agent("b", "one"), agent("c", "two")]
+        let marks = tracker.workspaceMarks(agents: agents, selectedWorkspaceID: "")
+        precondition(marks == ["one": .attention, "two": .reply], "Запрос внимания важнее завершений других агентов")
+        precondition(tracker.workspaceMarks(agents: Array(agents.reversed()), selectedWorkspaceID: "") == marks,
+                     "Приоритет не зависит от порядка агентов")
+    }
+
+    static func workspaceBlockedUsesCurrentSnapshot() {
+        var tracker = AgentUnreadTracker()
+        tracker.synchronize(bootID: "boot", statuses: ["a": "blocked"], viewedPane: "a")
+        precondition(tracker.marks.isEmpty)
+        let blocked = [agent("a", "one", "blocked")]
+        precondition(tracker.workspaceMarks(agents: blocked, selectedWorkspaceID: "two")["one"] == .attention,
+                     "blocked требует ответа уже на первом снимке без unread")
+        precondition(tracker.workspaceMarks(agents: blocked, selectedWorkspaceID: "one").isEmpty)
+        tracker.markViewed("a")
+        precondition(tracker.workspaceMarks(agents: blocked, selectedWorkspaceID: "two")["one"] == .attention,
+                     "Уход после просмотра не отменяет текущий blocked")
+        tracker.synchronize(bootID: "boot", statuses: ["a": "working"], viewedPane: nil)
+        precondition(tracker.workspaceMarks(agents: [agent("a", "one", "working")], selectedWorkspaceID: "two").isEmpty,
+                     "После снятия blocked без unread эффект исчезает")
+    }
+
+    static func workspaceSelectionDoesNotReadOtherAgents() {
+        var tracker = AgentUnreadTracker()
+        tracker.synchronize(bootID: "boot", statuses: ["a": "working", "b": "working"], viewedPane: nil)
+        tracker.synchronize(bootID: "boot", statuses: ["a": "done", "b": "done"], viewedPane: "a")
+        let agents = [agent("a", "one", "done"), agent("b", "one", "done")]
+        precondition(tracker.marks == ["b": .reply], "Просмотр одной панели не читает остальных")
+        precondition(tracker.workspaceMarks(agents: agents, selectedWorkspaceID: "one").isEmpty,
+                     "Выбранное пространство не имеет ореола")
+        precondition(tracker.marks == ["b": .reply], "Выбор пространства не очищает unread")
+        precondition(tracker.workspaceMarks(agents: agents, selectedWorkspaceID: "two")["one"] == .reply)
+        tracker.markViewed("b")
+        precondition(tracker.workspaceMarks(agents: agents, selectedWorkspaceID: "two").isEmpty)
+    }
+
+    static func workspaceProjectionFollowsAgentMoveAndRemoval() {
+        var tracker = AgentUnreadTracker()
+        tracker.record(.reply, paneID: "a", bootID: "boot", viewedPane: nil)
+        precondition(tracker.workspaceMarks(agents: [agent("a", "old")], selectedWorkspaceID: "") == ["old": .reply])
+        precondition(tracker.workspaceMarks(agents: [agent("a", "new")], selectedWorkspaceID: "") == ["new": .reply],
+                     "Отметка следует реальному workspace_id, не старой карточке")
+        precondition(tracker.workspaceMarks(agents: [], selectedWorkspaceID: "").isEmpty,
+                     "Исчезнувший агент не создаёт эффекта даже до pruning отметки")
+    }
+
+    static func workspaceProjectionDoesNotInheritPreviousBoot() {
+        var tracker = AgentUnreadTracker()
+        tracker.record(.attention, paneID: "a", bootID: "old", viewedPane: nil)
+        tracker.synchronize(bootID: "new", statuses: ["a": "done", "b": "blocked"], viewedPane: nil)
+        let agents = [agent("a", "one", "done"), agent("b", "two", "blocked")]
+        precondition(tracker.workspaceMarks(agents: agents, selectedWorkspaceID: "") == ["two": .attention],
+                     "Новый boot не наследует завершение, но показывает текущий blocked")
+    }
+
+    static func workspaceProjectionIgnoresEmptyIdentities() {
+        let tracker = AgentUnreadTracker()
+        let agents = [agent("", "one", "blocked"), agent("a", "", "blocked"),
+                      ["workspace_id": "two", "agent_status": "blocked"],
+                      ["pane_id": "b", "agent_status": "blocked"]]
+        precondition(tracker.workspaceMarks(agents: agents, selectedWorkspaceID: "").isEmpty)
     }
 }

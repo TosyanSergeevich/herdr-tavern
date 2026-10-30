@@ -147,6 +147,14 @@ Known source information:
   independent rights verification has not been performed.
 - Image sources and terms for the agent-card chains are recorded in
   licenses/AgentChains.txt.
+- resources/Textures/TavernVisuals/nebula/workspace-nebula.png is a rendered
+  animation derived from Deepfield by Candle Light:
+  https://candlelightgame.itch.io/deepfield
+  workspace-nebula-weights.png contains lighting weights derived from that
+  animation. Permission to redistribute these exports has not been confirmed.
+  They are included for the owner's local evaluation only and must not be
+  published without resolving the export rights. The Electron/Chromium notices
+  shipped with Deepfield do not license its artwork or generated exports.
 
 resources/Textures/TavernVisuals/sprites/glow.png, particle-core.png, and
 particle-soft.png are deterministic procedural radial-falloff shapes authored

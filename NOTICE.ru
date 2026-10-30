@@ -152,6 +152,14 @@ resources/Textures/TavernVisuals/sources/ и resources/Icons/Sources/.
   Tavern; независимая проверка прав не выполнялась.
 - Источники и условия для цепей карточек агентов записаны
   в licenses/AgentChains.ru.txt (исходная версия — licenses/AgentChains.txt).
+- resources/Textures/TavernVisuals/nebula/workspace-nebula.png — отрендеренная
+  анимация на основе Deepfield, автор Candle Light:
+  https://candlelightgame.itch.io/deepfield
+  workspace-nebula-weights.png содержит веса освещения из этой анимации.
+  Разрешение на распространение экспортов не подтверждено. Ресурсы добавлены
+  только для локальной оценки владельцем; до выяснения прав публиковать их
+  нельзя. Лицензии Electron/Chromium из поставки Deepfield не лицензируют
+  его художественные материалы или полученные экспорты.
 
 resources/Textures/TavernVisuals/sprites/glow.png, particle-core.png
 и particle-soft.png — детерминированные процедурные формы с радиальным

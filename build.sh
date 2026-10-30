@@ -57,6 +57,8 @@ runtime_textures=(
     ButtonNavigation.png ButtonPrimary.png ButtonTool.png ButtonToolIcon.png
     LivingHangingLantern.png LivingLanternBracket.png
     TavernVisuals/materials/plank-atlas.png
+    TavernVisuals/nebula/workspace-nebula.png
+    TavernVisuals/nebula/workspace-nebula-weights.png
     TavernVisuals/sprites/bookmark.png
     TavernVisuals/sprites/bookmark-height.png
     TavernVisuals/sprites/bookmark-material.png
@@ -77,6 +79,7 @@ for texture in "${runtime_textures[@]}"; do
 done
 mkdir -p "$APP/Contents/Resources/Shaders"
 cp resources/Shaders/TavernCard.metal "$APP/Contents/Resources/Shaders/"
+cp resources/Shaders/TavernWorkspaceNebula.metal "$APP/Contents/Resources/Shaders/"
 cp resources/Icons/AppIcon.icns "$APP/Contents/Resources/"
 codesign --force --sign "$SIGNING_IDENTITY" --identifier org.local.HerdrTavern "$APP"
 codesign --verify --deep --strict "$APP"

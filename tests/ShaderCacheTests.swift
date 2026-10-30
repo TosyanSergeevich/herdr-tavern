@@ -131,6 +131,8 @@ import CryptoKit
                                 magicPosition: inputs.magicPosition, magicColour: inputs.magicColour)
         encoder.setRenderPipelineState(pipeline)
         encoder.setFragmentBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 0)
+        var nebula = TavernNebulaLighting.none
+        encoder.setFragmentBytes(&nebula, length: MemoryLayout<TavernNebulaLighting>.stride, index: 1)
         for (index, texture) in maps.textures.enumerated() { encoder.setFragmentTexture(texture, index: index) }
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         encoder.endEncoding()

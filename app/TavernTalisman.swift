@@ -14,7 +14,7 @@ enum TavernAgentVisualStatus: String, CaseIterable {
         }
     }
 
-    fileprivate var color: NSColor {
+    var color: NSColor {
         switch self {
         case .progress: return NSColor(srgbRed: 0.15, green: 0.72, blue: 1, alpha: 1)
         case .success: return NSColor(srgbRed: 0.23, green: 0.85, blue: 0.45, alpha: 1)

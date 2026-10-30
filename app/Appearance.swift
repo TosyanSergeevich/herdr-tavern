@@ -382,6 +382,65 @@ class TavernButton: NSButton {
     private var cardSurface: TavernCardSurfaceView?
     private var cardText: TavernCardTextView?
     private var talisman: TavernTalismanView?
+    private var workspaceNebula: TavernWorkspaceNebulaView?
+    private var workspaceAttention: AgentUnreadKind?
+
+    func setWorkspaceAttention(_ kind: AgentUnreadKind?) {
+        workspaceAttention = kind
+        updateWorkspaceNebula()
+    }
+
+    private func removeWorkspaceNebula() {
+        guard let nebula = workspaceNebula else { return }
+        nebula.onLightingChange = nil
+        nebula.configure(cardSize: bounds.insetBy(dx: 3, dy: 3).size, kind: nil)
+        nebula.removeFromSuperview()
+        workspaceNebula = nil
+        cardSurface?.nebulaLightingProvider = nil
+        cardSurface?.refreshLighting()
+    }
+
+    private func updateWorkspaceNebula() {
+        let workspaceActive = style == .workspace && !selected && workspaceAttention != nil
+        let agentColor = style == .agent ? dragAgentStatus?.color : nil
+        guard (workspaceActive || agentColor != nil), isEnabled,
+              let parent = superview, let surface = cardSurface else {
+            removeWorkspaceNebula()
+            return
+        }
+        let padding = TavernWorkspaceNebulaView.padding
+        let decorationFrame = frame.insetBy(dx: -padding, dy: -padding)
+        let nebula: TavernWorkspaceNebulaView
+        if let existing = workspaceNebula {
+            nebula = existing
+            TavernMotion.move(nebula, to: decorationFrame)
+        } else {
+            nebula = TavernWorkspaceNebulaView(frame: decorationFrame)
+            nebula.wantsLayer = true
+            nebula.setAccessibilityElement(false)
+            workspaceNebula = nebula
+            // Весь декор ниже карточек, не внутри кнопки и не влияет на layout.
+            parent.addSubview(nebula, positioned: .below, relativeTo: nil)
+            nebula.onLightingChange = { [weak surface] in surface?.refreshLighting() }
+            surface.nebulaLightingProvider = { [weak nebula] in nebula?.materialLights ?? .none }
+            TavernMotion.appear(nebula)
+        }
+        if let agentColor {
+            nebula.configure(cardSize: bounds.insetBy(dx: 3, dy: 3).size, agentColor: agentColor)
+        } else {
+            nebula.configure(cardSize: bounds.insetBy(dx: 3, dy: 3).size, kind: workspaceAttention)
+        }
+    }
+
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        updateWorkspaceNebula()
+    }
+
+    override func setFrameOrigin(_ newOrigin: NSPoint) {
+        super.setFrameOrigin(newOrigin)
+        updateWorkspaceNebula()
+    }
     var lampWindowPosition: (() -> CGPoint)?
     private var isBoard: Bool { style == .workspace || style == .agent }
     private let interactionSurface = CALayer()
@@ -504,6 +563,7 @@ class TavernButton: NSButton {
         }
         cardText?.frame = bounds
         talisman?.frame = bounds
+        updateWorkspaceNebula()
         guard feedbackPrepared else { return }
         CATransaction.begin(); CATransaction.setDisableActions(true)
         interactionSurface.frame = bounds
@@ -527,9 +587,15 @@ class TavernButton: NSButton {
         super.setFrameSize(newSize)
         updateMaterialImage()
         needsLayout = true
+        updateWorkspaceNebula()
     }
 
-    override var isEnabled: Bool { didSet { updateFeedback() } }
+    override var isEnabled: Bool {
+        didSet {
+            updateFeedback()
+            updateWorkspaceNebula()
+        }
+    }
 
     override var title: String {
         didSet {
@@ -585,6 +651,11 @@ class TavernButton: NSButton {
             }
             let hash = identity.utf8.reduce(UInt64(14695981039346656037)) { ($0 ^ UInt64($1)) &* 1099511628211 }
             cardSurface?.configure(seed: hash, construction: style == .workspace ? .workspace : .agent, selected: selected)
+            if style != .agent, let talisman {
+                talisman.removeFromSuperview()
+                self.talisman = nil
+                cardSurface?.magicLightProvider = nil
+            }
             if style == .agent && talisman == nil {
                 let effects = TavernTalismanView(frame: bounds)
                 addSubview(effects); talisman = effects
@@ -600,6 +671,7 @@ class TavernButton: NSButton {
             cardText?.removeFromSuperview(); cardText = nil
             talisman?.removeFromSuperview(); talisman = nil
         }
+        updateWorkspaceNebula()
         updateFeedback(animated: animateFeedback)
         isBordered = false; focusRingType = .exterior
         setButtonType(.momentaryPushIn)
@@ -640,6 +712,7 @@ class TavernButton: NSButton {
     func setAgentVisualStatus(_ status: TavernAgentVisualStatus?) {
         if dragAgentStatus != status { dragAgentStatus = status; dragVisualVersion &+= 1 }
         talisman?.configure(status: status)
+        updateWorkspaceNebula()
         cardSurface?.refreshLighting()
     }
     func requestDragImage(completion: @escaping (Result<NSImage, Error>) -> Void) {

@@ -9,6 +9,8 @@ struct CardUniforms {
     float4 magicPosition; // XYZ + strength of the talisman's actual moving light
     float4 magicColour; // RGB: talisman light; W: steady selection illumination
 };
+struct NebulaLight { float4 position; float4 colour; };
+struct NebulaLighting { NebulaLight lights[7]; };
 struct CardVertex { float4 position [[position]]; float2 uv; };
 vertex CardVertex tavernCardVertex(uint id [[vertex_id]]) {
     const float2 points[3] = {float2(-1, -1), float2(3, -1), float2(-1, 3)};
@@ -64,6 +66,7 @@ fragment float tavernCardShadowFragment(CardVertex in [[stage_in]],
 
 fragment float4 tavernCardFragment(CardVertex in [[stage_in]],
     constant CardUniforms &u [[buffer(0)]],
+    constant NebulaLighting &nebula [[buffer(1)]],
     texture2d<float> albedo [[texture(0)]], texture2d<float> heights [[texture(1)]],
     texture2d<float> normals [[texture(2)]], texture2d<float> materials [[texture(3)]],
     texture2d<float, access::read> lampVisibility [[texture(4)]]) {
@@ -121,6 +124,28 @@ fragment float4 tavernCardFragment(CardVertex in [[stage_in]],
     colour += u.magicColour.w * (float3(1, .56f, .18f)
         * ((.06f + .14f * overheadDiffuse) * metal + .04f * innerGlow)
         + linearBase * float3(.24f, .12f, .035f));
+    // Only new radiance is added: a zeroed buffer preserves the old shader exactly.
+    for (int i = 0; i < 7; ++i) {
+        NebulaLight s = nebula.lights[i];
+        if (s.position.w <= 0.0f) continue;
+        float3 travel = s.position.xyz - p;
+        float3 l = normalize(travel), h = normalize(l + float3(0, 0, 1));
+        float nl = max(dot(n, l), 0.0f), nv = max(n.z, .001f);
+        float nh = max(dot(n, h), 0.0f), vh = max(h.z, 0.0f);
+        float a = rough * rough, a2 = a * a;
+        float den = nh * nh * (a2 - 1.0f) + 1.0f;
+        float D = a2 / (M_PI_F * den * den + .0001f);
+        float k = (rough + 1.0f) * (rough + 1.0f) / 8.0f;
+        float G = nv / (nv * (1.0f - k) + k) * nl / (nl * (1.0f - k) + k);
+        float3 f0 = mix(float3(.035f), float3(.83f, .58f, .23f), material.g);
+        float3 F = f0 + (1.0f - f0) * pow(1.0f - vh, 5.0f);
+        float3 spec = D * G * F / max(4.0f * nv * nl, .001f);
+        float3 diff = linearBase * (1.0f - material.g) / M_PI_F;
+        float radius = max(s.colour.w, .001f);
+        float falloff = 1.0f / (1.0f + dot(travel, travel) / (radius * radius));
+        float localShadow = overheadVisibility(heights, p, l, size);
+        colour += (diff + spec) * s.colour.rgb * s.position.w * 10.0f * falloff * nl * localShadow * ao;
+    }
     colour = pow(max(colour, float3(0)), float3(1.0f / 2.2f));
     return float4(colour * source.a, source.a);
 }

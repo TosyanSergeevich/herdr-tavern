@@ -29,6 +29,21 @@ struct AgentUnreadTracker {
     private var statuses: [String: String] = [:]
     private var hasSnapshot = false
 
+    // Проекция текущих агентов, не отдельное состояние прочтения пространства.
+    // blocked остаётся актуальным запросом даже после просмотра его панели.
+    func workspaceMarks(agents: [[String: Any]], selectedWorkspaceID: String) -> [String: AgentUnreadKind] {
+        var result: [String: AgentUnreadKind] = [:]
+        for agent in agents {
+            guard let paneID = agent["pane_id"] as? String, !paneID.isEmpty,
+                  let workspaceID = agent["workspace_id"] as? String, !workspaceID.isEmpty,
+                  workspaceID != selectedWorkspaceID else { continue }
+            let kind = agent["agent_status"] as? String == "blocked" ? .attention : marks[paneID]
+            guard let kind else { continue }
+            if result[workspaceID] != .attention { result[workspaceID] = kind }
+        }
+        return result
+    }
+
     @discardableResult
     private mutating func useBoot(_ boot: String) -> Bool {
         guard boot != bootID else { return false }

@@ -108,6 +108,7 @@ private final class TavernCardClock {
 final class TavernCardSurfaceView: NSView, MTKViewDelegate {
     var lightPositionProvider: (() -> CGPoint)? { didSet { requestFrame() } }
     var magicLightProvider: (() -> (position: CGPoint, colour: SIMD3<Float>, power: Float)?)?
+    var nebulaLightingProvider: (() -> TavernNebulaLighting)? { didSet { requestFrame() } }
     func refreshLighting() { requestFrame() }
     private let renderer: TavernCardRenderer
     private let metalView: MTKView
@@ -514,6 +515,9 @@ final class TavernCardSurfaceView: NSView, MTKViewDelegate {
         }
         encoder.setRenderPipelineState(renderer.pipeline)
         encoder.setFragmentBytes(&uniforms, length: MemoryLayout<TavernCardUniforms>.stride, index: 0)
+        // Native maps use a height-normalized scene; providers use card-surface points.
+        var nebula = (nebulaLightingProvider?() ?? .none).scaled(by: Float(1 / min(1, bounds.height / 140)))
+        encoder.setFragmentBytes(&nebula, length: MemoryLayout<TavernNebulaLighting>.stride, index: 1)
         for (index, texture) in maps.textures.enumerated() { encoder.setFragmentTexture(texture, index: index) }
         encoder.setFragmentTexture(capturedShadow.texture, index: 4)
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
@@ -729,6 +733,7 @@ final class TavernCardRenderer {
     let queue: MTLCommandQueue
     let pipeline: MTLRenderPipelineState
     let shadowPipeline: MTLRenderPipelineState
+    let nebula: TavernWorkspaceNebulaResources
     private let cache = NSCache<TavernMaterialCacheKey<TavernCardMaterialKey>, TavernCardMaps>()
     private let plankCache = NSCache<TavernMaterialCacheKey<TavernPlankKey>, TavernPlankMaps>()
     private var sources: [String: CGImage] = [:]
@@ -763,7 +768,13 @@ final class TavernCardRenderer {
         }
         planks = try TavernPlankMaterial(atlas: atlas)
         workerPlanks = try TavernPlankMaterial(atlas: atlas)
-        let library = try device.makeLibrary(source: String(contentsOf: shader, encoding: .utf8), options: nil)
+        guard let nebulaShader = Bundle.main.url(forResource: "TavernWorkspaceNebula", withExtension: "metal", subdirectory: "Shaders") else {
+            throw TavernCardResourceError.invalid(L("core.card.unreadableFile", "Shaders/TavernWorkspaceNebula.metal"))
+        }
+        let shaderSource = try String(contentsOf: shader, encoding: .utf8)
+            + "\n" + String(contentsOf: nebulaShader, encoding: .utf8)
+        let library = try device.makeLibrary(source: shaderSource, options: nil)
+        nebula = try TavernWorkspaceNebulaResources(device: device, root: root, library: library)
         let descriptor = MTLRenderPipelineDescriptor()
         descriptor.vertexFunction = library.makeFunction(name: "tavernCardVertex")
         descriptor.fragmentFunction = library.makeFunction(name: "tavernCardFragment")

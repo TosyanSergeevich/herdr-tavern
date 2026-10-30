@@ -477,7 +477,7 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         terminalChrome.frame = NSRect(x: 0, y: 4, width: w, height: max(0, h - tabHeight - 4))
         let sw = sidebarPanel.bounds.width, sh = sidebarPanel.bounds.height
         let narrow = sw < 210
-        let headerHeight: CGFloat = narrow ? 82 : sh < 420 ? 112 : 142
+        let headerHeight: CGFloat = (narrow ? 82 : sh < 420 ? 112 : 142) - TavernWorkspaceNebulaView.padding
         let headingBottom: CGFloat = narrow ? 58 : sh < 420 ? 92 : 122
         sidebarHeading.font = narrow ? TavernAppearance.narrowWorkspaceHeadingFont : TavernAppearance.workspaceHeadingFont
         sidebarHeading.frame = NSRect(x: 18, y: max(0, sh - headingBottom), width: max(0, sw - 65), height: 32)
@@ -733,6 +733,7 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         let workspaces = objects(snapshot["workspaces"])
         let allAgents = objects(snapshot["agents"])
         let agents = allAgents.filter { string($0["workspace_id"]) == ws }
+        let workspaceMarks = unread.workspaceMarks(agents: allAgents, selectedWorkspaceID: ws)
         let agentCounts = allAgents.reduce(into: [String: Int]()) { $0[string($1["workspace_id"]), default: 0] += 1 }
         let panesByID = Dictionary(uniqueKeysWithValues: objects(snapshot["panes"]).map { (string($0["pane_id"]), $0) })
         let tabsByID = Dictionary(uniqueKeysWithValues: objects(snapshot["tabs"]).map { (string($0["tab_id"]), $0) })
@@ -744,7 +745,7 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         }
         let contentHeight = max(sidebarScroll.contentSize.height, CGFloat(workspaces.count) * 60
             + CGFloat(max(1, agents.count)) * 90 + CGFloat(chainCount) * AgentChainView.extraGap
-            + CGFloat(max(0, agents.count - 1) - chainCount) * AgentChainView.groupGap + 79)
+            + CGFloat(max(0, agents.count - 1) - chainCount) * AgentChainView.groupGap + 79 + TavernWorkspaceNebulaView.padding)
         sidebar.frame = NSRect(x: 0, y: 0, width: sidebarScroll.contentSize.width, height: contentHeight)
         sidebarScroll.tile()
         if sidebar.frame.width != sidebarScroll.contentSize.width {
@@ -752,13 +753,20 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         }
         sidebar.scroll(NSPoint(x: 0, y: max(0, contentHeight - sidebarScroll.contentSize.height - preservedOffset)))
         createWorkspaceButton.isEnabled = attached && !sidebarPanel.isHidden
-        var top = contentHeight - 3
+        // Запас внутри viewport компенсирует его расширение вверх: карточки не сдвигаются.
+        var top = contentHeight - 3 - TavernWorkspaceNebulaView.padding
         let bw = max(0, sidebar.bounds.width - 8)
         for row in workspaces {
-            let id = string(row["workspace_id"]), title = string(row["label"])
+            let id = string(row["workspace_id"]), label = string(row["label"])
             let agentCount = agentCounts[id, default: 0]
             let subtitle = L("shell.agents.count", agentCount)
-            _ = button(title.isEmpty ? id : title, action: "workspace.focus", target: id, frame: NSRect(x: 4, y: top - 54, width: bw, height: 54), parent: sidebar, buttons: &sidebarButtons, appearing: &appearing, selected: id == ws, subtitle: subtitle)
+            let title = label.isEmpty ? id : label
+            let item = button(title, action: "workspace.focus", target: id, frame: NSRect(x: 4, y: top - 54, width: bw, height: 54), parent: sidebar, buttons: &sidebarButtons, appearing: &appearing, selected: id == ws, subtitle: subtitle)
+            let mark = workspaceMarks[id]
+            item.setWorkspaceAttention(mark)
+            let details = [subtitle, mark?.label ?? ""].filter { !$0.isEmpty }.joined(separator: "\n")
+            item.toolTip = title + "\n" + details
+            item.setAccessibilityHelp(details)
             top -= 60
         }
         top -= 6
