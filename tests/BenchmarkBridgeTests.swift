@@ -7,7 +7,41 @@ import Darwin
         while !predicate(), Date() < deadline { RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.005)) }
         precondition(predicate(), description)
     }
+    static func presentationWithoutPaint() {
+        typealias Frame = TavernBenchmarkPresentation.FrameID
+        let first = Frame(boot: "boot", projection: 1, surface: 1)
+        var state = TavernBenchmarkPresentation()
+        state.applied(first, needsPaint: false)
+        let checkpoint = state.checkpoint
+        precondition(state.completion(after: checkpoint, allowNoPaint: true, condition: true) == nil,
+                     "An earlier apply must not complete a new command")
+        let scrolled = Frame(boot: "boot", projection: 1, surface: 2)
+        state.applied(scrolled, needsPaint: false)
+        precondition(state.completion(after: checkpoint, allowNoPaint: true, condition: false) == nil,
+                     "No-paint scroll still requires its server acknowledgement")
+        precondition(state.completion(after: checkpoint, allowNoPaint: true, condition: true) == .noTerminalPaint)
+        precondition(state.completion(after: checkpoint, allowNoPaint: false, condition: true) == nil,
+                     "Other actions must retain the draw boundary")
+
+        let next = state.checkpoint
+        let pending = Frame(boot: "boot", projection: 1, surface: 3)
+        state.applied(pending, needsPaint: true)
+        state.applied(Frame(boot: "boot", projection: 1, surface: 4), needsPaint: true)
+        precondition(state.completion(after: next, allowNoPaint: true, condition: true) == nil,
+                     "An unchanged frame must not bypass an outstanding paint")
+        state.drew(Frame(boot: "boot", projection: 1, surface: 4), at: 50, tab: "tab", pane: "pane")
+        precondition(state.completion(after: next, allowNoPaint: true, condition: true) == .painted(50))
+
+        let synchronous = state.checkpoint
+        let drawnFirst = Frame(boot: "boot", projection: 1, surface: 5)
+        state.drew(drawnFirst, at: 80, tab: "tab", pane: "pane")
+        state.applied(drawnFirst, needsPaint: false)
+        precondition(state.completion(after: synchronous, allowNoPaint: true, condition: true) == .painted(80),
+                     "A synchronous draw before apply publication is still a draw")
+        print("PASS: acknowledged no-paint completion, pending paint and draw/apply ordering")
+    }
     static func main() throws {
+        presentationWithoutPaint()
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
         defer { try? FileManager.default.removeItem(at: root) }

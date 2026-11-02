@@ -110,10 +110,7 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     private var pendingTabTimings: [(boot: String, tab: String, started: UInt64)] = []
     private var performanceContextTimer: Timer?
     private var benchmarkBridge: TavernBenchmarkBridge?
-    private var benchmarkDrawSequence: UInt64 = 0
-    private var benchmarkDrawTime: UInt64 = 0
-    private var benchmarkDrawTab = ""
-    private var benchmarkDrawPane = ""
+    private var benchmarkPresentation = TavernBenchmarkPresentation()
     private var benchmarkWaitTimer: Timer?
     private var benchmarkScrollSerial: UInt64 = 0
     private var benchmarkScrollTarget = 0
@@ -1222,6 +1219,7 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             pendingSnapshot = (event.metadata, presentation)
             publishPendingSnapshot()
             updateVisibility()
+            benchmarkDidApply()
         case UInt32(TAVERN_FULL), UInt32(TAVERN_PATCH):
             do {
                 try surface.apply(metadata: event.metadata, segments: event.segments, images: event.images, patch: event.kind == UInt32(TAVERN_PATCH))
@@ -1229,6 +1227,7 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
                 if event.kind == UInt32(TAVERN_FULL) { try installPopup(event) }
                 publishPendingSnapshot()
                 updateVisibility()
+                benchmarkDidApply()
             } catch { disconnect { error.localizedDescription } }
         case UInt32(TAVERN_RESPONSE):
             guard let action = inFlight,
@@ -2096,10 +2095,21 @@ private extension TavernDelegate {
         }
         pendingTabTimings.removeAll { $0.boot != boot || $0.tab == tab }
         guard benchmarkBridge != nil else { return }
-        benchmarkDrawSequence &+= 1
-        benchmarkDrawTime = now
-        benchmarkDrawTab = tab
-        benchmarkDrawPane = string(snapshot["focused_pane_id"])
+        benchmarkPresentation.drew(benchmarkFrameID(), at: now, tab: tab,
+                                    pane: string(snapshot["focused_pane_id"]))
+    }
+
+    func benchmarkFrameID() -> TavernBenchmarkPresentation.FrameID {
+        .init(boot: string(surface.scene["boot_id"]),
+              projection: integer(surface.scene["projection_revision"]),
+              surface: integer(surface.scene["surface_revision"]))
+    }
+
+    func benchmarkDidApply() {
+        guard benchmarkBridge != nil,
+              string(surface.scene["boot_id"]) == string(snapshot["boot_id"]),
+              integer(surface.scene["projection_revision"]) == integer(snapshot["revision"]) else { return }
+        benchmarkPresentation.applied(benchmarkFrameID(), needsPaint: surface.needsDisplay)
     }
 
     @objc func markPerformanceIncident(_ sender: Any?) {
@@ -2158,21 +2168,29 @@ private extension TavernDelegate {
         ]
     }
 
-    func benchmarkWaitForDraw(after sequence: UInt64, started: UInt64,
+    func benchmarkWaitForDraw(after checkpoint: TavernBenchmarkPresentation.Checkpoint, started: UInt64,
                               stage: TavernPerformance.Stage = .inputToDraw,
+                              allowNoPaint: Bool = false,
                               condition: @escaping () -> Bool,
                               reply: @escaping TavernBenchmarkBridge.Reply) {
         benchmarkWaitTimer?.invalidate()
         let deadline = Date(timeIntervalSinceNow: 8)
         let timer = Timer(timeInterval: 0.005, repeats: true) { [weak self] timer in
             guard let self, !self.terminated else { timer.invalidate(); reply(.failure(.unavailable)); return }
-            if self.benchmarkDrawSequence > sequence && condition() {
+            if let completion = self.benchmarkPresentation.completion(
+                after: checkpoint, allowNoPaint: allowNoPaint, condition: condition()) {
                 timer.invalidate(); self.benchmarkWaitTimer = nil
-                let duration = self.benchmarkDrawTime &- started
-                TavernPerformance.shared.duration(stage, nanoseconds: duration)
                 var result = self.benchmarkInspect()
-                result["latency_ns"] = duration
-                result["boundary"] = "input_to_draw"
+                switch completion {
+                case .painted(let time):
+                    let duration = time &- started
+                    TavernPerformance.shared.duration(stage, nanoseconds: duration)
+                    result["latency_ns"] = duration
+                    result["boundary"] = "input_to_draw"
+                case .noTerminalPaint:
+                    result["boundary"] = "frame_applied_no_terminal_damage"
+                    result["no_terminal_paint"] = true
+                }
                 result["text"] = result["terminal_text"]
                 reply(.success(result))
             } else if Date() >= deadline {
@@ -2206,7 +2224,7 @@ private extension TavernDelegate {
         guard state["ready"] as? Bool == true else { reply(.failure(.unavailable)); return }
         guard state["visible"] as? Bool == true else { reply(.failure(.notVisible)); return }
         let started = DispatchTime.now().uptimeNanoseconds
-        let sequence = benchmarkDrawSequence
+        let sequence = benchmarkPresentation.checkpoint
         switch operation {
         case "focus", "focus_pane":
             let isTab = operation == "focus"
@@ -2224,7 +2242,7 @@ private extension TavernDelegate {
             benchmarkWaitForDraw(after: sequence, started: started,
                 condition: { [weak self] in
                     guard let self else { return false }
-                    return (isTab ? self.benchmarkDrawTab : self.benchmarkDrawPane) == target
+                    return (isTab ? self.benchmarkPresentation.drawnTab : self.benchmarkPresentation.drawnPane) == target
                 }, reply: reply)
         case "scroll":
             guard let lines = command["lines"] as? Double, lines.isFinite, abs(lines) <= 65535,
@@ -2245,7 +2263,7 @@ private extension TavernDelegate {
                 var result = benchmarkInspect(); result["no_change"] = true
                 result["latency_ns"] = 0; result["boundary"] = "input_to_draw"; reply(.success(result)); return
             }
-            benchmarkWaitForDraw(after: sequence, started: started, condition: { [weak self] in
+            benchmarkWaitForDraw(after: sequence, started: started, allowNoPaint: true, condition: { [weak self] in
                 guard let self, let confirmed = self.benchmarkScrollAcknowledged else { return false }
                 let current = self.benchmarkInspect()
                 let maximum = integer(current["maximum"]), offset = integer(current["offset"])

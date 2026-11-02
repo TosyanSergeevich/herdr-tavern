@@ -110,14 +110,15 @@ private final class TavernCardClock {
     }
 }
 /// Decorative only: the owning native button retains hit testing, text and accessibility.
-final class TavernCardSurfaceView: NSView, MTKViewDelegate {
+final class TavernCardSurfaceView: NSView {
     var lightPositionProvider: (() -> CGPoint)? { didSet { requestFrame() } }
     var magicLightProvider: (() -> (position: CGPoint, colour: SIMD3<Float>, power: Float)?)?
     var nebulaLightingProvider: (() -> TavernNebulaLighting)? { didSet { requestFrame() } }
     func refreshLighting() { requestFrame() }
     private let renderer: TavernCardRenderer
-    private let metalView: MTKView
-    private let presentationMetrics = TavernMetalPresentationMetrics(stage: .cardPresentation, counter: .cardPresented)
+    private let metalView: TavernCardMetalHost
+    private let metalLayer: CAMetalLayer
+    private var renderWorker: TavernCardRenderWorker!
     private var seed: UInt64 = 0
     private var construction = TavernPlankConstruction.agent
     private var selected = false
@@ -140,14 +141,19 @@ final class TavernCardSurfaceView: NSView, MTKViewDelegate {
     private var fastClock = false
     private var geometrySize = CGSize.zero
     private var bookmark = TavernBookmarkMotion()
-    private var animatedMaps: TavernCardMaps?
+    private var renderRevision: UInt64 = 0
     fileprivate var bookmarkAnimating: Bool { bookmark.isAnimating }
     private var geometryPixels = CGSize.zero
     #if TAVERN_RENDER_TESTING
     var testingVisibilityPolicy: (() -> Bool)?
     var testingReduceMotionPolicy: (() -> Bool)?
     var testingBookmarkTime: CFTimeInterval?
+    var renderGate: (() -> Void)?
+    var renderCompletionGate: (() -> Void)?
+    private var testingDrawableSize: CGSize?
+    var testingRenderState: (running: Bool, pending: Bool, starts: Int) { renderWorker.testingState }
     var onSubmittedFrame: ((TavernCardMaterialKey, CGRect, CGSize) -> Void)?
+    var onRenderedInputs: ((TavernCardSnapshotInputs, TavernNebulaLighting, SIMD2<Float>?) -> Void)?
     // Copied into each immutable job on main; the gate runs only on the readback worker.
     var snapshotCompletionGate: (() -> Void)?
     var testingSnapshotFailure: Error?
@@ -165,8 +171,8 @@ final class TavernCardSurfaceView: NSView, MTKViewDelegate {
         set { clock = newValue }
     }
     func testingSetDrawableSize(_ size: CGSize) {
-        metalView.autoResizeDrawable = false
-        metalView.drawableSize = size
+        testingDrawableSize = size
+        metalLayer.drawableSize = size
         geometryChanged()
     }
     #endif
@@ -193,19 +199,30 @@ final class TavernCardSurfaceView: NSView, MTKViewDelegate {
             preconditionFailure("Card resources must be prepared before constructing a view")
         }
         self.renderer = renderer
-        metalView = MTKView(frame: .zero, device: renderer.device)
+        let host = TavernCardMetalHost(frame: .zero)
+        host.wantsLayer = true
+        metalView = host
+        metalLayer = host.layer as! CAMetalLayer
         super.init(frame: frameRect)
         setAccessibilityElement(false)
         wantsLayer = true
-        metalView.colorPixelFormat = .bgra8Unorm
-        metalView.framebufferOnly = true
-        metalView.clearColor = MTLClearColorMake(0, 0, 0, 0)
-        metalView.isPaused = true
-        metalView.enableSetNeedsDisplay = false
-        metalView.wantsLayer = true
-        metalView.layer?.isOpaque = false
+        metalLayer.device = renderer.device
+        metalLayer.pixelFormat = .bgra8Unorm
+        metalLayer.framebufferOnly = true
+        metalLayer.isOpaque = false
+        metalLayer.allowsNextDrawableTimeout = true
         metalView.setAccessibilityElement(false)
-        metalView.delegate = self
+        renderWorker = TavernCardRenderWorker(layer: metalLayer, renderer: renderer) { [weak self] frame, shadow in
+            guard let self, self.visible, self.renderRevision == frame.revision else { return }
+            self.visibilityShadow = shadow
+            #if TAVERN_RENDER_TESTING
+            self.onSubmittedFrame?(frame.key, frame.bounds, frame.drawableSize)
+            self.onRenderedInputs?(TavernCardSnapshotInputs(key: frame.key, bounds: frame.bounds,
+                clock: frame.clock, geometry: frame.uniforms.geometry, lamp: frame.uniforms.lamp,
+                magicPosition: frame.uniforms.magicPosition, magicColour: frame.uniforms.magicColour),
+                frame.nebula, frame.bookmarkPose)
+            #endif
+        }
         addSubview(metalView)
         let center = NotificationCenter.default
         for name in [NSApplication.didHideNotification, NSApplication.didUnhideNotification] {
@@ -224,6 +241,7 @@ final class TavernCardSurfaceView: NSView, MTKViewDelegate {
 
     deinit {
         preparation?.cancel()
+        renderWorker?.suspend()
         for observer in observers {
             NotificationCenter.default.removeObserver(observer)
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
@@ -241,6 +259,7 @@ final class TavernCardSurfaceView: NSView, MTKViewDelegate {
         guard changed || maps == nil else { return }
         if changed {
             self.seed = seed
+            invalidateRendering()
             self.construction = construction
             self.selected = selected
             generation &+= 1
@@ -248,7 +267,7 @@ final class TavernCardSurfaceView: NSView, MTKViewDelegate {
             materialKey = nil
             visibilityShadow = nil
         }
-        if visible, geometrySize == bounds.size, geometryPixels == metalView.drawableSize, let key = exactKey() {
+        if visible, geometrySize == bounds.size, geometryPixels == metalLayer.drawableSize, let key = exactKey() {
             prefetch(key)
         }
         requestFrame()
@@ -257,12 +276,14 @@ final class TavernCardSurfaceView: NSView, MTKViewDelegate {
     override func layout() {
         super.layout()
         if metalView.frame != bounds { metalView.frame = bounds }
+        updateDrawableSize()
         watchClipView()
         geometryChanged()
     }
 
     override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()
+        updateDrawableSize()
         geometryChanged()
     }
 
@@ -324,8 +345,8 @@ final class TavernCardSurfaceView: NSView, MTKViewDelegate {
     }
 
     private func exactKey(width: Int? = nil, height: Int? = nil) -> TavernCardMaterialKey? {
-        let width = width ?? Int(metalView.drawableSize.width.rounded())
-        let height = height ?? Int(metalView.drawableSize.height.rounded())
+        let width = width ?? Int(metalLayer.drawableSize.width.rounded())
+        let height = height ?? Int(metalLayer.drawableSize.height.rounded())
         guard width > 0, height > 0, bounds.width > 0, bounds.height > 0 else { return nil }
         return TavernCardMaterialKey(plank: TavernPlankKey(seed: seed, construction: construction,
             pixelWidth: width, pixelHeight: height, pointWidth: bounds.width, pointHeight: bounds.height),
@@ -375,17 +396,18 @@ final class TavernCardSurfaceView: NSView, MTKViewDelegate {
             guard let self else { return }
             self.flushScheduled = false
             guard self.dirty else { return }
-            self.metalView.draw()
+            self.submitFrame()
         }
     }
 
     private func geometryChanged() {
-        let changed = geometrySize != bounds.size || geometryPixels != metalView.drawableSize
+        let changed = geometrySize != bounds.size || geometryPixels != metalLayer.drawableSize
         geometrySize = bounds.size
-        geometryPixels = metalView.drawableSize
+        geometryPixels = metalLayer.drawableSize
         guard changed else { updateClock(); return }
         if changed {
             generation &+= 1
+            invalidateRendering()
             maps = nil
             materialKey = nil
             visibilityShadow = nil
@@ -394,7 +416,7 @@ final class TavernCardSurfaceView: NSView, MTKViewDelegate {
         }
         dirty = true
         updateClock()
-        if visible { metalView.draw() }
+        if visible { submitFrame() }
     }
 
     private func updateClock() {
@@ -403,10 +425,11 @@ final class TavernCardSurfaceView: NSView, MTKViewDelegate {
         if !shown || reducedMotion { bookmark.finish() }
         else { bookmark.advance(at: bookmarkTime) }
         if wasAnimating && !bookmark.isAnimating {
-            animatedMaps = nil
+            invalidateRendering()
             visibilityShadow = nil
         }
         let run = shown && !reducedMotion
+        if clockActive != run { invalidateRendering() }
         if clockActive != run || fastClock != bookmark.isAnimating {
             clockActive = run
             fastClock = bookmark.isAnimating
@@ -414,9 +437,9 @@ final class TavernCardSurfaceView: NSView, MTKViewDelegate {
         }
         if !run {
             previousTime = nil
-            presentationMetrics.suspend()
         }
         if !shown {
+            invalidateRendering()
             generation &+= 1
             preparation?.cancel()
             pendingKey = nil
@@ -441,54 +464,43 @@ final class TavernCardSurfaceView: NSView, MTKViewDelegate {
         }
     }
 
-    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
-        dirty = true
+    private func updateDrawableSize() {
+        let scale = window?.backingScaleFactor ?? 2
+        metalLayer.contentsScale = scale
+        #if TAVERN_RENDER_TESTING
+        if let testingDrawableSize { metalLayer.drawableSize = testingDrawableSize; return }
+        #endif
+        metalLayer.drawableSize = CGSize(width: (bounds.width * scale).rounded(),
+                                         height: (bounds.height * scale).rounded())
     }
 
-    func draw(in view: MTKView) {
+    private func invalidateRendering() {
+        renderRevision &+= 1
+        visibilityShadow = nil
+        renderWorker?.suspend()
+    }
+
+    private func submitFrame() {
+        precondition(Thread.isMainThread)
         guard visible else { updateClock(); return }
         guard dirty || !reducedMotion, let key = exactKey() else { return }
-        let drawableSpan = TavernPerformance.shared.begin(.cardDrawable)
-        let acquiredDrawable = view.currentDrawable
-        let acquiredPass = acquiredDrawable == nil ? nil : view.currentRenderPassDescriptor
-        TavernPerformance.shared.end(drawableSpan)
-        guard let drawable = acquiredDrawable, let pass = acquiredPass,
-              let command = renderer.queue.makeCommandBuffer() else {
-            TavernPerformance.shared.count(.cardUnavailable)
-            return
-        }
-        guard drawable.texture.width == key.plank.pixelWidth,
-              drawable.texture.height == key.plank.pixelHeight else {
-            TavernPerformance.shared.count(.cardUnavailable)
-            return
-        }
         let maps = exactMaps(for: key, retain: true)
         advanceClock()
-        let encodeSpan = TavernPerformance.shared.begin(.cardEncode)
-        do {
-            visibilityShadow = try encode(maps: maps, key: key, uniforms: captureUniforms(),
-                                          pass: pass, command: command)
-        } catch { fatalError(error.localizedDescription) }
-        TavernPerformance.shared.end(encodeSpan)
-        if TavernPerformance.shared.isEnabled {
-            let presentationMetrics = self.presentationMetrics
-            let token = presentationMetrics.frameToken(continuous: !reducedMotion)
-            drawable.addPresentedHandler { drawable in
-                presentationMetrics.presented(at: drawable.presentedTime, token: token)
-            }
-        }
-        command.present(drawable)
-        command.addCompletedHandler { command in
-            TavernMetalPresentationMetrics.gpu(command, stage: .cardGPU)
-            if command.status == .error {
-                fatalError(L("core.card.renderFailed", String(describing: command.error)))
-            }
-        }
-        command.commit()
+        let pose = bookmark.isAnimating ? bookmark.pose(at: bookmarkTime) : nil
+        var frame = TavernCardRenderWorker.Frame(
+            revision: renderRevision, key: key, bounds: bounds, drawableSize: metalLayer.drawableSize,
+            maps: maps, uniforms: captureUniforms(), nebula: captureNebula(),
+            bookmarkPose: pose.map { SIMD2($0.offset, $0.bend) }, animated: !reducedMotion, clock: clock)
         #if TAVERN_RENDER_TESTING
-        onSubmittedFrame?(key, bounds, view.drawableSize)
+        frame.gate = renderGate
+        frame.completionGate = renderCompletionGate
         #endif
+        renderWorker.submit(frame)
         dirty = false
+    }
+
+    private func captureNebula() -> TavernNebulaLighting {
+        (nebulaLightingProvider?() ?? .none).scaled(by: Float(1 / min(1, bounds.height / 140)))
     }
 
     private func exactMaps(for key: TavernCardMaterialKey, retain: Bool) -> TavernCardMaps {
@@ -527,108 +539,6 @@ final class TavernCardSurfaceView: NSView, MTKViewDelegate {
         return uniforms
     }
 
-    private func encode(maps baseMaps: TavernCardMaps, key: TavernCardMaterialKey,
-                        uniforms captured: TavernCardUniforms,
-                        pass: MTLRenderPassDescriptor, command: MTLCommandBuffer) throws -> TavernCardShadow {
-        guard let target = pass.colorAttachments[0].texture else {
-            throw TavernCardSnapshotError.unavailable
-        }
-        let maps = try bookmark.isAnimating
-            ? composeBookmark(base: baseMaps, geometry: captured.geometry, command: command) : baseMaps
-        let shadowKey = TavernCardShadowKey(material: key, pixelWidth: target.width,
-            pixelHeight: target.height, geometry: captured.geometry, lamp: captured.lamp)
-        let capturedShadow: TavernCardShadow
-        if let shadow = visibilityShadow, shadow.key == shadowKey, !bookmark.isAnimating {
-            capturedShadow = shadow
-        } else {
-            if let shadow = visibilityShadow, shadow.key == shadowKey {
-                capturedShadow = shadow
-            } else {
-                let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-                    pixelFormat: .r32Float, width: target.width, height: target.height, mipmapped: false)
-                descriptor.storageMode = .private
-                descriptor.usage = [.renderTarget, .shaderRead]
-                guard let texture = renderer.device.makeTexture(descriptor: descriptor) else {
-                    throw TavernCardSnapshotError.unavailable
-                }
-                capturedShadow = TavernCardShadow(key: shadowKey, texture: texture)
-            }
-            let shadowPass = MTLRenderPassDescriptor()
-            shadowPass.colorAttachments[0].texture = capturedShadow.texture
-            shadowPass.colorAttachments[0].loadAction = .dontCare
-            shadowPass.colorAttachments[0].storeAction = .store
-            guard let encoder = command.makeRenderCommandEncoder(descriptor: shadowPass) else {
-                throw TavernCardSnapshotError.encoder
-            }
-            var uniforms = captured
-            encoder.setRenderPipelineState(renderer.shadowPipeline)
-            encoder.setFragmentBytes(&uniforms, length: MemoryLayout<TavernCardUniforms>.stride, index: 0)
-            encoder.setFragmentTexture(maps.textures[1], index: 1)
-            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-            encoder.endEncoding()
-        }
-        var uniforms = captured
-        guard let encoder = command.makeRenderCommandEncoder(descriptor: pass) else {
-            throw TavernCardSnapshotError.encoder
-        }
-        encoder.setRenderPipelineState(renderer.pipeline)
-        encoder.setFragmentBytes(&uniforms, length: MemoryLayout<TavernCardUniforms>.stride, index: 0)
-        // Native maps use a height-normalized scene; providers use card-surface points.
-        var nebula = (nebulaLightingProvider?() ?? .none).scaled(by: Float(1 / min(1, bounds.height / 140)))
-        encoder.setFragmentBytes(&nebula, length: MemoryLayout<TavernNebulaLighting>.stride, index: 1)
-        for (index, texture) in maps.textures.enumerated() { encoder.setFragmentTexture(texture, index: index) }
-        encoder.setFragmentTexture(capturedShadow.texture, index: 4)
-        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-        encoder.endEncoding()
-        // Keep replaced textures and their exact maps alive until all encoded reads finish.
-        command.addCompletedHandler { _ in
-            withExtendedLifetime((maps, capturedShadow)) {}
-        }
-        return capturedShadow
-    }
-
-    /// Transient MRT maps keep the existing lighting/shadow shaders and snapshot path identical.
-    /// Textures are reused for the short transition, never baked on the CPU per frame.
-    private func composeBookmark(base: TavernCardMaps, geometry: SIMD4<Float>,
-                                 command: MTLCommandBuffer) throws -> TavernCardMaps {
-        let size = base.textures[0]
-        if animatedMaps?.textures[0].width != size.width || animatedMaps?.textures[0].height != size.height {
-            var textures: [MTLTexture] = []
-            for _ in 0..<4 {
-                let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm,
-                    width: size.width, height: size.height, mipmapped: false)
-                descriptor.storageMode = .private
-                descriptor.usage = [.renderTarget, .shaderRead]
-                guard let texture = renderer.device.makeTexture(descriptor: descriptor) else {
-                    throw TavernCardSnapshotError.unavailable
-                }
-                textures.append(texture)
-            }
-            animatedMaps = TavernCardMaps(textures)
-        }
-        let maps = animatedMaps!
-        let pass = MTLRenderPassDescriptor()
-        for index in 0..<4 {
-            pass.colorAttachments[index].texture = maps.textures[index]
-            pass.colorAttachments[index].loadAction = .dontCare
-            pass.colorAttachments[index].storeAction = .store
-        }
-        guard let encoder = command.makeRenderCommandEncoder(descriptor: pass) else {
-            throw TavernCardSnapshotError.encoder
-        }
-        let pose = bookmark.pose(at: bookmarkTime)
-        var uniforms = SIMD4(geometry.x, geometry.y, pose.offset, pose.bend)
-        encoder.setRenderPipelineState(renderer.bookmarkPipeline)
-        encoder.setFragmentBytes(&uniforms, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
-        for (index, texture) in base.textures.enumerated() { encoder.setFragmentTexture(texture, index: index) }
-        for (index, texture) in renderer.bookmarkTextures.enumerated() {
-            encoder.setFragmentTexture(texture, index: index + 4)
-        }
-        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-        encoder.endEncoding()
-        command.addCompletedHandler { _ in withExtendedLifetime((base, maps)) {} }
-        return maps
-    }
 
     private static let snapshotReadbackQueue = DispatchQueue(
         label: "org.herdr.tavern.card-snapshot", qos: .userInitiated)
@@ -676,7 +586,11 @@ final class TavernCardSurfaceView: NSView, MTKViewDelegate {
             pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
             // New snapshot shadows remain job-local, including failed GPU submissions.
             // Only an already exact live shadow can be reused.
-            _ = try encode(maps: capturedMaps, key: key, uniforms: uniforms, pass: pass, command: command)
+            let snapshotEncoder = TavernCardFrameEncoder(renderer: renderer, shadow: visibilityShadow)
+            let pose = bookmark.isAnimating ? bookmark.pose(at: bookmarkTime) : nil
+            _ = try snapshotEncoder.encode(maps: capturedMaps, key: key, uniforms: uniforms,
+                nebula: captureNebula(), bookmarkPose: pose.map { SIMD2($0.offset, $0.bend) },
+                pass: pass, command: command)
             #if TAVERN_RENDER_TESTING
             let completionGate = snapshotCompletionGate
             let injectedFailure = testingSnapshotFailure
@@ -717,6 +631,326 @@ final class TavernCardSurfaceView: NSView, MTKViewDelegate {
             }
             command.commit()
         } catch { deliver(.failure(error)) }
+    }
+}
+
+private final class TavernCardMetalHost: NSView {
+    override var isOpaque: Bool { false }
+    override var wantsUpdateLayer: Bool { true }
+    override func updateLayer() {}
+    override func makeBackingLayer() -> CALayer { CAMetalLayer() }
+}
+
+private final class TavernCardFrameEncoder {
+    private let renderer: TavernCardRenderer
+    private var visibilityShadow: TavernCardShadow?
+    private var animatedShadow: TavernCardShadow?
+    private var animatedMaps: TavernCardMaps?
+    init(renderer: TavernCardRenderer, shadow: TavernCardShadow? = nil) {
+        self.renderer = renderer
+        visibilityShadow = shadow
+    }
+
+    func reset() {
+        visibilityShadow = nil
+        animatedShadow = nil
+        animatedMaps = nil
+    }
+    func encode(maps baseMaps: TavernCardMaps, key: TavernCardMaterialKey,
+                uniforms captured: TavernCardUniforms, nebula capturedNebula: TavernNebulaLighting,
+                bookmarkPose: SIMD2<Float>?,
+                pass: MTLRenderPassDescriptor, command: MTLCommandBuffer) throws -> TavernCardShadow {
+        guard let target = pass.colorAttachments[0].texture else {
+            throw TavernCardSnapshotError.unavailable
+        }
+        let maps = try bookmarkPose.map {
+            try composeBookmark(base: baseMaps, geometry: captured.geometry, pose: $0, command: command)
+        } ?? baseMaps
+        let shadowKey = TavernCardShadowKey(material: key, pixelWidth: target.width,
+            pixelHeight: target.height, geometry: captured.geometry, lamp: captured.lamp)
+        let capturedShadow: TavernCardShadow
+        if let shadow = visibilityShadow, shadow.key == shadowKey, bookmarkPose == nil {
+            capturedShadow = shadow
+        } else {
+            if bookmarkPose != nil, let shadow = animatedShadow, shadow.key == shadowKey {
+                capturedShadow = shadow
+            } else {
+                let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+                    pixelFormat: .r32Float, width: target.width, height: target.height, mipmapped: false)
+                descriptor.storageMode = .private
+                descriptor.usage = [.renderTarget, .shaderRead]
+                guard let texture = renderer.device.makeTexture(descriptor: descriptor) else {
+                    throw TavernCardSnapshotError.unavailable
+                }
+                capturedShadow = TavernCardShadow(key: shadowKey, texture: texture)
+            }
+            if bookmarkPose != nil { animatedShadow = capturedShadow }
+            let shadowPass = MTLRenderPassDescriptor()
+            shadowPass.colorAttachments[0].texture = capturedShadow.texture
+            shadowPass.colorAttachments[0].loadAction = .dontCare
+            shadowPass.colorAttachments[0].storeAction = .store
+            guard let encoder = command.makeRenderCommandEncoder(descriptor: shadowPass) else {
+                throw TavernCardSnapshotError.encoder
+            }
+            var uniforms = captured
+            encoder.setRenderPipelineState(renderer.shadowPipeline)
+            encoder.setFragmentBytes(&uniforms, length: MemoryLayout<TavernCardUniforms>.stride, index: 0)
+            encoder.setFragmentTexture(maps.textures[1], index: 1)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            encoder.endEncoding()
+        }
+        var uniforms = captured
+        guard let encoder = command.makeRenderCommandEncoder(descriptor: pass) else {
+            throw TavernCardSnapshotError.encoder
+        }
+        encoder.setRenderPipelineState(renderer.pipeline)
+        encoder.setFragmentBytes(&uniforms, length: MemoryLayout<TavernCardUniforms>.stride, index: 0)
+        // Native maps use a height-normalized scene; providers use card-surface points.
+        var nebula = capturedNebula
+        encoder.setFragmentBytes(&nebula, length: MemoryLayout<TavernNebulaLighting>.stride, index: 1)
+        for (index, texture) in maps.textures.enumerated() { encoder.setFragmentTexture(texture, index: index) }
+        encoder.setFragmentTexture(capturedShadow.texture, index: 4)
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        encoder.endEncoding()
+        // Keep replaced textures and their exact maps alive until all encoded reads finish.
+        command.addCompletedHandler { _ in
+            withExtendedLifetime((maps, capturedShadow)) {}
+        }
+        // Published shadows are immutable: snapshots may read them concurrently.
+        visibilityShadow = bookmarkPose == nil ? capturedShadow : nil
+        return capturedShadow
+    }
+
+    /// Transient MRT maps keep the existing lighting/shadow shaders and snapshot path identical.
+    /// Textures are reused for the short transition, never baked on the CPU per frame.
+    private func composeBookmark(base: TavernCardMaps, geometry: SIMD4<Float>, pose: SIMD2<Float>,
+                                 command: MTLCommandBuffer) throws -> TavernCardMaps {
+        let size = base.textures[0]
+        if animatedMaps?.textures[0].width != size.width || animatedMaps?.textures[0].height != size.height {
+            var textures: [MTLTexture] = []
+            for _ in 0..<4 {
+                let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm,
+                    width: size.width, height: size.height, mipmapped: false)
+                descriptor.storageMode = .private
+                descriptor.usage = [.renderTarget, .shaderRead]
+                guard let texture = renderer.device.makeTexture(descriptor: descriptor) else {
+                    throw TavernCardSnapshotError.unavailable
+                }
+                textures.append(texture)
+            }
+            animatedMaps = TavernCardMaps(textures)
+        }
+        let maps = animatedMaps!
+        let pass = MTLRenderPassDescriptor()
+        for index in 0..<4 {
+            pass.colorAttachments[index].texture = maps.textures[index]
+            pass.colorAttachments[index].loadAction = .dontCare
+            pass.colorAttachments[index].storeAction = .store
+        }
+        guard let encoder = command.makeRenderCommandEncoder(descriptor: pass) else {
+            throw TavernCardSnapshotError.encoder
+        }
+        var uniforms = SIMD4(geometry.x, geometry.y, pose.x, pose.y)
+        encoder.setRenderPipelineState(renderer.bookmarkPipeline)
+        encoder.setFragmentBytes(&uniforms, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
+        for (index, texture) in base.textures.enumerated() { encoder.setFragmentTexture(texture, index: index) }
+        for (index, texture) in renderer.bookmarkTextures.enumerated() {
+            encoder.setFragmentTexture(texture, index: index + 4)
+        }
+        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        encoder.endEncoding()
+        command.addCompletedHandler { _ in withExtendedLifetime((base, maps)) {} }
+        return maps
+    }
+}
+
+// One in-flight job through GPU completion, and one latest immutable input.
+private final class TavernCardRenderWorker {
+    struct Frame {
+        let revision: UInt64
+        let key: TavernCardMaterialKey
+        let bounds: CGRect
+        let drawableSize: CGSize
+        let maps: TavernCardMaps
+        let uniforms: TavernCardUniforms
+        let nebula: TavernNebulaLighting
+        let bookmarkPose: SIMD2<Float>?
+        let animated: Bool
+        let clock: Double
+        #if TAVERN_RENDER_TESTING
+        var gate: (() -> Void)?
+        var completionGate: (() -> Void)?
+        #endif
+    }
+    private let layer: CAMetalLayer
+    private let renderer: TavernCardRenderer
+    private let encoder: TavernCardFrameEncoder
+    private let queue = DispatchQueue(label: "org.herdr.tavern.card-render", qos: .userInitiated)
+    private let lock = NSLock()
+    private var pending: Frame?
+    private var running = false
+    private var idleCleanupScheduled = false
+    private var generation: UInt64 = 0
+    private var encodedGeneration: UInt64?
+    private let presentation = TavernMetalPresentationMetrics(stage: .cardPresentation, counter: .cardPresented)
+    private let completed: (Frame, TavernCardShadow?) -> Void
+    #if TAVERN_RENDER_TESTING
+    private var starts = 0
+    var testingState: (running: Bool, pending: Bool, starts: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (running, pending != nil, starts)
+    }
+    #endif
+
+    init(layer: CAMetalLayer, renderer: TavernCardRenderer,
+         completed: @escaping (Frame, TavernCardShadow?) -> Void) {
+        self.layer = layer
+        self.renderer = renderer
+        encoder = TavernCardFrameEncoder(renderer: renderer)
+        self.completed = completed
+    }
+
+    func submit(_ frame: Frame) {
+        precondition(Thread.isMainThread)
+        lock.lock()
+        pending = frame
+        let start = !running
+        running = true
+        lock.unlock()
+        if start { queue.async { self.render() } }
+    }
+
+    func suspend() {
+        precondition(Thread.isMainThread)
+        lock.lock()
+        generation &+= 1
+        pending = nil
+        let cleanIdle = !running && !idleCleanupScheduled
+        if cleanIdle { idleCleanupScheduled = true }
+        lock.unlock()
+        presentation.suspend()
+        if cleanIdle {
+            queue.async {
+                self.lock.lock()
+                self.idleCleanupScheduled = false
+                let idle = !self.running
+                self.lock.unlock()
+                // No generation snapshot: repeated hidden invalidations must not
+                // cancel the one coalesced cleanup. New renders queue behind it.
+                if idle {
+                    self.encoder.reset()
+                    self.encodedGeneration = nil
+                }
+            }
+        }
+    }
+
+    private func active(_ token: UInt64) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return generation == token
+    }
+
+    private func render() {
+        precondition(!Thread.isMainThread)
+        autoreleasepool {
+            lock.lock()
+            guard let initial = pending else {
+                lock.unlock()
+                finish()
+                return
+            }
+            let token = generation
+            pending = nil
+            #if TAVERN_RENDER_TESTING
+            starts += 1
+            #endif
+            lock.unlock()
+            #if TAVERN_RENDER_TESTING
+            initial.gate?()
+            #endif
+            guard active(token) else { finish(); return }
+            let drawableSpan = TavernPerformance.shared.begin(.cardDrawable)
+            let drawable = layer.nextDrawable()
+            TavernPerformance.shared.end(drawableSpan)
+            guard let drawable else {
+                TavernPerformance.shared.count(.cardUnavailable)
+                finish()
+                return
+            }
+            lock.lock()
+            guard token == generation else {
+                lock.unlock()
+                finish()
+                return
+            }
+            let frame = pending ?? initial
+            pending = nil
+            lock.unlock()
+            guard drawable.texture.width == Int(frame.drawableSize.width),
+                  drawable.texture.height == Int(frame.drawableSize.height),
+                  let command = renderer.queue.makeCommandBuffer() else {
+                TavernPerformance.shared.count(.cardUnavailable)
+                finish()
+                return
+            }
+            if encodedGeneration != token {
+                encoder.reset()
+                encodedGeneration = token
+            }
+            let pass = MTLRenderPassDescriptor()
+            pass.colorAttachments[0].texture = drawable.texture
+            pass.colorAttachments[0].loadAction = .clear
+            pass.colorAttachments[0].storeAction = .store
+            pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
+            let encodeSpan = TavernPerformance.shared.begin(.cardEncode)
+            let shadow: TavernCardShadow
+            do {
+                shadow = try encoder.encode(maps: frame.maps, key: frame.key, uniforms: frame.uniforms,
+                    nebula: frame.nebula, bookmarkPose: frame.bookmarkPose, pass: pass, command: command)
+            } catch { fatalError(error.localizedDescription) }
+            TavernPerformance.shared.end(encodeSpan)
+            guard active(token) else { finish(); return }
+            if TavernPerformance.shared.isEnabled {
+                let metrics = presentation
+                let presentationToken = metrics.frameToken(continuous: frame.animated)
+                drawable.addPresentedHandler { metrics.presented(at: $0.presentedTime, token: presentationToken) }
+            }
+            command.present(drawable)
+            command.addCompletedHandler { command in
+                TavernMetalPresentationMetrics.gpu(command, stage: .cardGPU)
+                if command.status == .error {
+                    fatalError(L("core.card.renderFailed", String(describing: command.error)))
+                }
+                self.queue.async {
+                    #if TAVERN_RENDER_TESTING
+                    frame.completionGate?()
+                    #endif
+                    DispatchQueue.main.async {
+                        if self.active(token) {
+                            self.completed(frame, frame.bookmarkPose == nil ? shadow : nil)
+                        }
+                    }
+                    self.finish()
+                }
+                withExtendedLifetime((frame, shadow)) {}
+            }
+            command.commit()
+        }
+    }
+
+    private func finish() {
+        lock.lock()
+        let again = pending != nil
+        let invalidated = encodedGeneration != generation
+        if !again { running = false }
+        lock.unlock()
+        if !again && invalidated {
+            encoder.reset()
+            encodedGeneration = nil
+        }
+        if again { queue.async { self.render() } }
     }
 }
 

@@ -77,6 +77,55 @@ final class TavernBenchmarkBridge {
     }
 }
 
+// A committed frame need not dirty terminal pixels. Keep that outcome distinct
+// from a draw so a successful scroll cannot become a timeout or a fake latency.
+struct TavernBenchmarkPresentation {
+    struct FrameID: Equatable {
+        let boot: String
+        let projection: Int
+        let surface: Int
+    }
+    struct Checkpoint {
+        fileprivate let applied: UInt64
+        fileprivate let drawn: UInt64
+    }
+    enum Completion: Equatable {
+        case painted(UInt64)
+        case noTerminalPaint
+    }
+    private var appliedSequence: UInt64 = 0
+    private var drawnSequence: UInt64 = 0
+    private var lastApplied: FrameID?
+    private var lastDrawn: FrameID?
+    private var applyNeedsPaint = true
+    private var drawnAt: UInt64 = 0
+    private(set) var drawnTab = ""
+    private(set) var drawnPane = ""
+    var checkpoint: Checkpoint { Checkpoint(applied: appliedSequence, drawn: drawnSequence) }
+
+    mutating func applied(_ frame: FrameID, needsPaint: Bool) {
+        guard lastApplied != frame else { return }
+        lastApplied = frame
+        appliedSequence &+= 1
+        applyNeedsPaint = needsPaint || lastDrawn == frame
+    }
+    mutating func drew(_ frame: FrameID, at time: UInt64, tab: String, pane: String) {
+        lastDrawn = frame
+        drawnSequence &+= 1
+        drawnAt = time
+        drawnTab = tab
+        drawnPane = pane
+    }
+    func completion(after checkpoint: Checkpoint, allowNoPaint: Bool,
+                    condition: @autoclosure () -> Bool) -> Completion? {
+        let noPaint = allowNoPaint && appliedSequence > checkpoint.applied && !applyNeedsPaint
+        let painted = drawnSequence > checkpoint.drawn
+        guard (noPaint || painted) && condition() else { return nil }
+        return noPaint ? .noTerminalPaint : .painted(drawnAt)
+    }
+}
+
+
 // Calls the production scrollWheel path with a controlled precise delta and
 // actual window coordinates. This is synthetic input, not physical trackpad time.
 final class TavernBenchmarkScrollEvent: NSEvent {

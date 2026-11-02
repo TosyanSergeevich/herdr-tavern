@@ -10,13 +10,20 @@ func dictionary(_ value: Any?) -> [String: Any] { value as? [String: Any] ?? [:]
 func objects(_ value: Any?) -> [[String: Any]] { value as? [[String: Any]] ?? [] }
 func flag(_ value: Any?) -> Bool { (value as? NSNumber)?.boolValue ?? false }
 
-struct TerminalCell {
+struct TerminalCell: Equatable {
     var symbol = " "
     var foreground: UInt32 = 0
     var background: UInt32 = 0
     var modifier: UInt16 = 0
     var skip = false
     var hyperlink: UInt32?
+    static func == (lhs: TerminalCell, rhs: TerminalCell) -> Bool {
+        lhs.foreground == rhs.foreground && lhs.background == rhs.background &&
+            lhs.modifier == rhs.modifier && lhs.skip == rhs.skip && lhs.hyperlink == rhs.hyperlink &&
+            // CoreText consumes the supplied sequence, not Swift's canonically
+            // equivalent String identity; retain changes to combining sequences.
+            lhs.symbol.utf8.elementsEqual(rhs.symbol.utf8)
+    }
 }
 struct CellSegment { let x: Int; let y: Int; let cells: [TerminalCell] }
 struct GraphicAsset { let id: String; let width: Int; let height: Int; let format: Int; let data: Data }
@@ -268,6 +275,27 @@ final class SurfaceView: NSView, NSTextInputClient {
         linkClickButton = nil
         invalidate([bounds])
     }
+    private func fullSceneAllowsRowDamage(_ metadata: [String: Any]) -> Bool {
+        func equal(_ old: [String: Any], _ next: [String: Any], ignoring: (String) -> Bool) -> Bool {
+            for (key, value) in old where !ignoring(key) {
+                guard let previous = value as? NSObject, let following = next[key] as? NSObject,
+                      previous.isEqual(following) else { return false }
+            }
+            return next.keys.allSatisfy { ignoring($0) || old[$0] != nil }
+        }
+        // Cursor/IME and selection have explicit old/new damage below. Everything
+        // else (including links, focus, pane geometry, splits and graphics) keeps
+        // the conservative full-scene path when its metadata changes.
+        guard equal(scene, metadata, ignoring: {
+            $0 == "surface_revision" || $0 == "projection_revision" || $0 == "cursor" || $0 == "panes"
+        }) else { return false }
+        let oldPanes = objects(scene["panes"]), nextPanes = objects(metadata["panes"])
+        guard oldPanes.count == nextPanes.count else { return false }
+        for (old, next) in zip(oldPanes, nextPanes) {
+            if !equal(old, next, ignoring: { $0 == "content_revision" || $0 == "scroll" }) { return false }
+        }
+        return true
+    }
     func apply(metadata: [String: Any], segments: [CellSegment], images decoded: [String: CGImage], patch: Bool) throws {
         precondition(Thread.isMainThread)
         let performanceSpan = TavernPerformance.shared.begin(.surfaceApply)
@@ -309,6 +337,26 @@ final class SurfaceView: NSView, NSTextInputClient {
         let oldSelection = selection
         var damage: [NSRect] = []
         var changedRows = Set<Int>()
+        // A wire full frame is still a complete replacement. With stable grid and
+        // graphics geometry, only rows whose cell values changed need new ink.
+        // Compare actual cells, never revisions: a new revision may change only
+        // pane scroll/selection metadata or the cursor.
+        let comparableFull = !patch && width == w && height == h && cells.count == w * h &&
+            rowInk.count == h && !reset && decoded.isEmpty && fullSceneAllowsRowDamage(metadata)
+        if comparableFull {
+            let next = segments[0].cells
+            for row in 0..<h {
+                let start = row * w
+                for index in start..<(start + w) where cells[index] != next[index] {
+                    changedRows.insert(row)
+                    break
+                }
+            }
+        }
+        let incremental = patch || (comparableFull && changedRows.count < h)
+        if !patch && incremental {
+            damage = changedRows.sorted().map { rowInk[$0].bounds }
+        }
         if patch {
             let anchors = affectedAnchors(segments)
             damage = anchors.map { glyphFootprint(at: $0) }
@@ -354,6 +402,15 @@ final class SurfaceView: NSView, NSTextInputClient {
             for row in changedRows { hoverRowGenerations[row] &+= 1 }
             damage += affectedAnchors(segments).map { glyphFootprint(at: $0) }
             rebuildInk(rows: changedRows.sorted())
+        } else if incremental {
+            cancelLinkHover()
+            hoverResolver.invalidate()
+            for row in changedRows { hoverRowGenerations[row] &+= 1 }
+            let sortedRows = changedRows.sorted()
+            rebuildInk(rows: sortedRows)
+            for (index, row) in sortedRows.enumerated() {
+                damage[index] = damage[index].union(rowInk[row].bounds)
+            }
         } else {
             cancelLinkHover()
             hoverResolver.invalidate()
@@ -363,7 +420,7 @@ final class SurfaceView: NSView, NSTextInputClient {
             rebuildInk(rows: 0..<height)
         }
         reconcileSelection()
-        if patch {
+        if incremental {
             // Repaint overlays over the entire old/new ink, not only patched cells.
             damage += selectionDifference(oldSelection, selection)
             let nextCursor = cursorRect(in: scene), nextMarked = markedTextRect(marked, in: scene)

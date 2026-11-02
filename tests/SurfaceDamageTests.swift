@@ -71,9 +71,14 @@ private final class DamageWindow: NSWindow {
         let canvas = NSSize(width: 1288, height: 920)
         var cells = SurfaceDamageTests.fixture()
         var revision: UInt64 = 0
+        var projectionRevision: UInt64 = 0
         var cursor: [String: Any] = ["visible": false, "x": 70, "y": 24, "shape": 0]
         var placements: [[String: Any]] = []
         var images: [String: CGImage] = [:]
+        var scroll: [String: Any]?
+        var focused = true
+        var paneColumns = columns
+        var hyperlinks: [String] = []
         var invalidations: [NSRect] = []
         var bitmap: NSBitmapImageRep!
 
@@ -92,19 +97,25 @@ private final class DamageWindow: NSWindow {
 
         func metadata(base: UInt64? = nil) -> [String: Any] {
             var result: [String: Any] = [
-                "boot_id": "surface-damage", "projection_revision": 1,
+                "boot_id": "surface-damage", "projection_revision": projectionRevision,
                 "surface_revision": revision, "width": columns, "height": rows,
-                "cursor": cursor, "placements": placements,
-                "panes": [["pane_id": "damage-pane", "focused": true,
+                "cursor": cursor, "placements": placements, "hyperlinks": hyperlinks,
+                "panes": [["pane_id": "damage-pane", "focused": focused,
                            "mouse_reporting": false, "content_revision": revision,
-                           "inner_rect": ["x": 0, "y": 0, "width": columns, "height": rows]]]
+                           "inner_rect": ["x": 0, "y": 0, "width": paneColumns, "height": rows]]]
             ]
+            if let scroll {
+                var panes = objects(result["panes"])
+                panes[0]["scroll"] = scroll
+                result["panes"] = panes
+            }
             if let base { result["base_surface_revision"] = base }
             return result
         }
 
         func full() throws {
             revision += 1
+            projectionRevision += 1
             try surface.apply(metadata: metadata(), segments: [CellSegment(x: 0, y: 0, cells: cells)],
                               images: images, patch: false)
         }
@@ -231,6 +242,72 @@ private final class DamageWindow: NSWindow {
         }
     }
 
+    private static func fullFrameCases(_ h: Oracle) throws {
+        try h.check("identical full cells with new projection and surface revisions need no paint", damage: .none, changesPixels: false) {
+            try h.full()
+        }
+        try h.check("full frame changes only one text row", damage: .partial) {
+            h.cells[columns + 5] = cell("Я", style: 5, background: 0x02304060)
+            try h.full()
+        }
+        try h.check("full frame erases old italic and combining ink", damage: .partial) {
+            for x in 5...31 { h.cells[4 * columns + x] = cell() }
+            try h.full()
+        }
+        try h.check("full frame replaces continuation cells and wide anchor", damage: .partial) {
+            h.cells[6 * columns + 40] = cell("i")
+            for x in 41...43 { h.cells[6 * columns + x] = cell() }
+            try h.full()
+        }
+        try h.check("full frame removes unknown emoji ink conservatively", damage: .full) {
+            h.cells[8 * columns + 40] = cell()
+            h.cells[8 * columns + 41] = cell()
+            try h.full()
+        }
+        try h.check("cursor-only full frame", damage: .partial) {
+            h.cursor = ["visible": true, "x": 70, "y": 24, "shape": 0]
+            try h.full()
+        }
+        h.check("mark before full cursor move") { h.mark("かな e\u{301}") }
+        try h.check("full frame moves cursor and IME without cell changes", damage: .partial) {
+            h.cursor = ["visible": true, "x": 78, "y": 26, "shape": 3]
+            try h.full()
+        }
+        h.check("unmark after full cursor move") { h.surface.unmarkText() }
+        try h.check("full frame hides cursor", damage: .partial) {
+            h.cursor["visible"] = false
+            try h.full()
+        }
+        try h.check("full frame adds scroll metadata without pixel changes", damage: .none, changesPixels: false) {
+            h.scroll = ["offset_from_bottom": 0, "max_offset_from_bottom": 100, "viewport_rows": rows]
+            try h.full()
+        }
+        h.check("select before full scroll boundary change") {
+            h.select(fromX: 2, fromY: 20, toX: 12, toY: 20)
+        }
+        try h.check("full metadata-only history truncation clears selection", damage: .partial) {
+            h.scroll?["max_offset_from_bottom"] = 99
+            try h.full()
+            precondition(!h.surface.hasLocalSelection, "Full metadata must reconcile selection even with identical cells")
+        }
+        try h.check("full frame focus change keeps conservative scene damage", damage: .full, changesPixels: false) {
+            h.focused = false
+            try h.full()
+        }
+        try h.check("full frame pane boundary change keeps conservative scene damage", damage: .full, changesPixels: false) {
+            h.paneColumns -= 1
+            try h.full()
+        }
+        try h.check("full frame hyperlink metadata change keeps conservative scene damage", damage: .full, changesPixels: false) {
+            h.hyperlinks = ["https://example.com"]
+            try h.full()
+        }
+        try h.check("full frame changing every row repaints entire surface", damage: .full) {
+            for row in 0..<rows { h.cells[row * columns + 80] = cell("Z") }
+            try h.full()
+        }
+    }
+
     private static func glyphCases(_ h: Oracle) throws {
         try h.check("ASCII single cell", damage: .partial) { try h.patch(x: 5, y: 1, [cell("Z")]) }
         try h.check("Cyrillic single cell", damage: .partial) { try h.patch(x: 6, y: 1, [cell("Я")]) }
@@ -340,6 +417,23 @@ private final class DamageWindow: NSWindow {
              "x_offset": 5, "y_offset": 2]
         ]
         try h.check("full transparent cropped negative/positive-z images", damage: .full) { try h.full() }
+        let uploaded = h.images
+        h.images = [:]
+        try h.check("full frame retains identical image placements without repaint", damage: .none, changesPixels: false) {
+            try h.full()
+        }
+        try h.check("full local row change recomposites retained overlapping images", damage: .partial, changesPixels: nil) {
+            h.cells[18 * columns + 9] = cell("Ж", style: 5, background: 0x02604020)
+            try h.full()
+        }
+        try h.check("full frame replaces image bytes under identical asset ID and placements", damage: .full) {
+            let solid = Data(repeating: 255, count: 64 * 40 * 4)
+            h.images = ["transparent": try GraphicAssetDecoder.decode(
+                GraphicAsset(id: "transparent", width: 64, height: 40, format: 1, data: solid))]
+            try h.full()
+        }
+        h.images = uploaded
+        try h.check("full frame restores transparent bytes under same asset ID", damage: .full) { try h.full() }
         try h.check("glyph/background patch beneath overlapping images", damage: .partial) {
             try h.patch(x: 9, y: 18, [cell("Ж", style: 5, background: 0x02604020), cell("Q")])
         }
@@ -367,6 +461,9 @@ private final class DamageWindow: NSWindow {
         }
         let fonts = try TerminalFonts.load(size: 16, bundle: bundle)
         for scale in [1, 2] {
+            let fullFrames = try Oracle(scale: scale, fonts: fonts)
+            try fullFrameCases(fullFrames)
+            fullFrames.window.close()
             let h = try Oracle(scale: scale, fonts: fonts)
             try glyphCases(h)
             try selectionCases(h)
