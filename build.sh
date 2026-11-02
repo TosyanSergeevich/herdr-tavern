@@ -28,6 +28,14 @@ for mapping in "$HOME=home" "${CARGO_HOME:-$HOME/.cargo}=cargo" "${RUSTUP_HOME:-
 done
 export CARGO_ENCODED_RUSTFLAGS
 
+# A local source fingerprint also identifies uncommitted builds. Refuse to stamp
+# a mixed build if sources change while Rust/Swift or resources are being read.
+source_digest() {
+    local digest
+    digest="$(find app include crates resources/Shaders -type f \( -name '*.swift' -o -name '*.rs' -o -name '*.h' -o -name '*.metal' -o -name 'Cargo.toml' \) -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256 | shasum -a 256)"
+    printf '%s' "${digest%% *}"
+}
+source_revision="$(source_digest)"
 cargo +stable build --locked --release -p tavern-client
 mkdir -p "$ROOT/build"
 STAGING="$(mktemp -d "$ROOT/build/.tavern-build.XXXXXX")"
@@ -81,6 +89,11 @@ mkdir -p "$APP/Contents/Resources/Shaders"
 cp resources/Shaders/TavernCard.metal "$APP/Contents/Resources/Shaders/"
 cp resources/Shaders/TavernWorkspaceNebula.metal "$APP/Contents/Resources/Shaders/"
 cp resources/Icons/AppIcon.icns "$APP/Contents/Resources/"
+if [[ "$(source_digest)" != "$source_revision" ]]; then
+    printf 'Sources changed during build; rerun without concurrent edits.\n' >&2
+    exit 1
+fi
+plutil -insert TavernBuildSourceDigest -string "$source_revision" "$APP/Contents/Info.plist"
 codesign --force --sign "$SIGNING_IDENTITY" --identifier org.local.HerdrTavern "$APP"
 codesign --verify --deep --strict "$APP"
 # Не трогаем прежнее приложение, пока новая сборка не подписана и не проверена.

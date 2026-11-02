@@ -189,3 +189,7 @@
 "shell.workspace.new" = "Новое пространство";
 "shell.workspace.new.menu" = "Новое пространство…";
 "shell.workspaces" = "Пространства";
+"shell.performance.export" = "Сохранить диагностику производительности…";
+"shell.performance.export.error" = "Не удалось сохранить диагностику";
+"shell.performance.benchmark.error" = "Небезопасное окружение нагрузочного стенда. Нужны отдельная папка с правами 0700 и явный клиентский socket.";
+"shell.performance.mark" = "Отметить задержку сейчас";

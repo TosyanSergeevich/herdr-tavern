@@ -167,6 +167,281 @@ private struct TavernNebulaUniforms {
     var tint: SIMD4<Float> // sRGB agent colour, strength; zero means workspace
 }
 
+private final class TavernNebulaMetalHost: NSView {
+    override var isOpaque: Bool { false }
+    override var wantsUpdateLayer: Bool { true }
+    override func updateLayer() {}
+    override func makeBackingLayer() -> CALayer { CAMetalLayer() }
+}
+
+enum TavernNebulaAnimationTime {
+    static func advancing(from previous: Double, to requested: Double) -> Double {
+        let difference = requested - previous
+        // Float shader uniforms can round a repeated timestamp slightly backward.
+        if abs(difference) < 0.00001 { return previous }
+        let elapsed = difference < 0 ? difference + 10 : difference
+        return elapsed <= 0.1 ? requested :
+            (previous + 0.1).truncatingRemainder(dividingBy: 10)
+    }
+}
+
+// Each layer owns its timeline. Metal invokes presented handlers off main;
+// this state must never share AppKit's animation/geometry fields.
+final class TavernMetalPresentationMetrics {
+    private let lock = NSLock()
+    private var lastPresentedTime: CFTimeInterval?
+    private var generation: UInt64 = 0
+    private let stage: TavernPerformance.Stage
+    private let counter: TavernPerformance.Counter
+
+    init(stage: TavernPerformance.Stage, counter: TavernPerformance.Counter) {
+        self.stage = stage
+        self.counter = counter
+    }
+
+    func suspend() {
+        guard TavernPerformance.shared.isEnabled else { return }
+        lock.lock()
+        generation &+= 1
+        lastPresentedTime = nil
+        lock.unlock()
+    }
+
+    func frameToken(continuous: Bool) -> UInt64? {
+        lock.lock()
+        defer { lock.unlock() }
+        if !continuous {
+            generation &+= 1
+            lastPresentedTime = nil
+            return nil
+        }
+        return generation
+    }
+
+    func presented(at time: CFTimeInterval, token: UInt64?) {
+        guard time.isFinite, time > 0 else { return }
+        TavernPerformance.shared.count(counter)
+        guard let token else { return }
+        lock.lock()
+        guard token == generation else { lock.unlock(); return }
+        let previous = lastPresentedTime
+        if previous == nil || time > previous! { lastPresentedTime = time }
+        lock.unlock()
+        if let previous, time > previous {
+            TavernPerformance.shared.duration(stage, nanoseconds: UInt64((time - previous) * 1_000_000_000))
+        }
+    }
+
+    static func gpu(_ command: MTLCommandBuffer, stage: TavernPerformance.Stage) {
+        guard TavernPerformance.shared.isEnabled else { return }
+        let start = command.gpuStartTime, end = command.gpuEndTime
+        guard command.status == .completed, start > 0, end >= start else { return }
+        TavernPerformance.shared.duration(stage, nanoseconds: UInt64((end - start) * 1_000_000_000))
+    }
+}
+
+// One job (including GPU execution) and one latest snapshot per view. Geometry
+// belongs to AppKit; this worker never reads an NSView or waits for main.
+private final class TavernNebulaRenderWorker {
+    private struct Configuration: Equatable {
+        let geometry: SIMD4<Float>
+        let clip: SIMD4<Float>
+        let tint: SIMD4<Float>
+        let drawableSize: CGSize
+        let animated: Bool
+    }
+    struct Frame {
+        var uniforms: TavernNebulaUniforms
+        let cardSize: NSSize
+        let drawableSize: CGSize
+        let animated: Bool
+        #if TAVERN_RENDER_TESTING
+        var gate: (() -> Void)?
+        var completionGate: (() -> Void)?
+        #endif
+    }
+    private let layer: CAMetalLayer
+    private let resources: TavernWorkspaceNebulaResources
+    private let commandQueue: MTLCommandQueue
+    private let queue = DispatchQueue(label: "org.herdr.tavern.nebula", qos: .userInitiated)
+    private let lock = NSLock()
+    private var pending: Frame?
+    private var running = false
+    private var generation: UInt64 = 0
+    private var configuration: Configuration?
+    private var configurationRevision: UInt64 = 0
+    // Only the serial render queue accesses animation continuity.
+    private var previousSeconds: Double?
+    private var previousGeneration: UInt64?
+    private let presentationMetrics = TavernMetalPresentationMetrics(stage: .nebulaPresentation, counter: .nebulaPresented)
+    private let completed: (TavernNebulaLighting, Double, CGSize) -> Void
+
+    init(layer: CAMetalLayer, renderer: TavernCardRenderer,
+         completed: @escaping (TavernNebulaLighting, Double, CGSize) -> Void) {
+        self.layer = layer
+        resources = renderer.nebula
+        commandQueue = renderer.queue
+        self.completed = completed
+    }
+
+    func submit(_ frame: Frame) {
+        lock.lock()
+        let next = Configuration(geometry: frame.uniforms.geometry, clip: frame.uniforms.clip,
+                                 tint: frame.uniforms.tint, drawableSize: frame.drawableSize,
+                                 animated: frame.animated)
+        if configuration != next {
+            configuration = next
+            configurationRevision &+= 1
+        }
+        let replaced = pending != nil
+        pending = frame
+        let start = !running
+        running = true
+        lock.unlock()
+        if replaced { TavernPerformance.shared.count(.nebulaReplaced) }
+        if start { queue.async { self.render() } }
+    }
+
+    func suspend() {
+        lock.lock()
+        pending = nil
+        generation &+= 1
+        presentationMetrics.suspend()
+        lock.unlock()
+    }
+
+    private func render() {
+        autoreleasepool {
+            lock.lock()
+            guard let initialFrame = pending else {
+                running = false
+                lock.unlock()
+                return
+            }
+            let token = generation
+            pending = nil
+            lock.unlock()
+            #if TAVERN_RENDER_TESTING
+            initialFrame.gate?()
+            #endif
+            lock.lock()
+            let active = token == generation
+            lock.unlock()
+            guard active else {
+                finish()
+                return
+            }
+            // Drawable acquisition may block the worker, never the main thread.
+            let drawableSpan = TavernPerformance.shared.begin(.nebulaDrawable)
+            let acquiredDrawable = layer.nextDrawable()
+            TavernPerformance.shared.end(drawableSpan)
+            guard let drawable = acquiredDrawable else {
+                TavernPerformance.shared.count(.nebulaUnavailable)
+                finish()
+                return
+            }
+            lock.lock()
+            guard token == generation else {
+                lock.unlock()
+                finish()
+                return
+            }
+            let frame = pending ?? initialFrame
+            pending = nil
+            let revision = configurationRevision
+            let presentationToken = TavernPerformance.shared.isEnabled
+                ? presentationMetrics.frameToken(continuous: frame.animated) : nil
+            lock.unlock()
+            // A resize on main can replace the drawable pool during acquisition.
+            guard drawable.texture.width == Int(frame.drawableSize.width),
+                  drawable.texture.height == Int(frame.drawableSize.height) else {
+                TavernPerformance.shared.count(.nebulaUnavailable)
+                finish()
+                return
+            }
+            let encodeSpan = TavernPerformance.shared.begin(.nebulaEncode)
+            var uniforms = frame.uniforms
+            let requested = Double(uniforms.timing.x)
+            let seconds: Double
+            if frame.animated, previousGeneration == token, let previousSeconds {
+                seconds = TavernNebulaAnimationTime.advancing(from: previousSeconds, to: requested)
+            } else {
+                seconds = requested
+            }
+            uniforms.timing.x = Float(seconds)
+            uniforms.timing.y = Float(Int((seconds * 24).rounded()) % 240)
+            var lights = resources.lighting(seconds: seconds, size: frame.cardSize)
+            var materialLights = resources.coupled(lights, seconds: seconds)
+            if uniforms.tint.w > 0 {
+                let tint = uniforms.tint
+                let colour = SIMD3(pow(tint.x, 2.2), pow(tint.y, 2.2), pow(tint.z, 2.2))
+                for index in 0..<7 {
+                    var light = materialLights[index]
+                    light.colour = SIMD4(colour.x, colour.y, colour.z, light.colour.w)
+                    light.position.w *= index < 4 ? 0.18 : 0
+                    materialLights[index] = light
+                }
+            }
+            let pass = MTLRenderPassDescriptor()
+            pass.colorAttachments[0].texture = drawable.texture
+            pass.colorAttachments[0].loadAction = .clear
+            pass.colorAttachments[0].storeAction = .store
+            pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
+            guard let command = commandQueue.makeCommandBuffer(),
+                  let encoder = command.makeRenderCommandEncoder(descriptor: pass) else {
+                TavernPerformance.shared.end(encodeSpan)
+                TavernPerformance.shared.count(.nebulaUnavailable)
+                finish()
+                return
+            }
+            encoder.setRenderPipelineState(resources.pipeline)
+            encoder.setFragmentBytes(&uniforms, length: MemoryLayout<TavernNebulaUniforms>.stride, index: 0)
+            encoder.setFragmentBytes(&lights, length: MemoryLayout<TavernNebulaLighting>.stride, index: 1)
+            encoder.setFragmentTexture(resources.atlas, index: 0)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            encoder.endEncoding()
+            TavernPerformance.shared.end(encodeSpan)
+            if TavernPerformance.shared.isEnabled {
+                let presentationMetrics = self.presentationMetrics
+                drawable.addPresentedHandler { drawable in
+                    presentationMetrics.presented(at: drawable.presentedTime, token: presentationToken)
+                }
+            }
+            command.present(drawable)
+            let publishedLights = materialLights
+            command.addCompletedHandler { command in
+                TavernMetalPresentationMetrics.gpu(command, stage: .nebulaGPU)
+                if command.status == .error {
+                    fatalError(L("core.card.renderFailed", String(describing: command.error)))
+                }
+                self.queue.async {
+                    #if TAVERN_RENDER_TESTING
+                    frame.completionGate?()
+                    #endif
+                    self.previousSeconds = seconds
+                    self.previousGeneration = frame.animated ? token : nil
+                    DispatchQueue.main.async {
+                        self.lock.lock()
+                        let current = token == self.generation && revision == self.configurationRevision
+                        self.lock.unlock()
+                        if current { self.completed(publishedLights, seconds, frame.drawableSize) }
+                    }
+                    self.finish()
+                }
+            }
+            command.commit()
+        }
+    }
+
+    private func finish() {
+        lock.lock()
+        let again = pending != nil
+        if !again { running = false }
+        lock.unlock()
+        if again { queue.async { self.render() } }
+    }
+}
+
 // One clock for every visible workspace. A view never owns an animation timer.
 private final class TavernWorkspaceNebulaClock {
     static let shared = TavernWorkspaceNebulaClock()
@@ -198,12 +473,20 @@ private final class TavernWorkspaceNebulaClock {
     }
 }
 
-final class TavernWorkspaceNebulaView: NSView, MTKViewDelegate {
+final class TavernWorkspaceNebulaView: NSView {
     static let padding: CGFloat = 18
+    #if TAVERN_RENDER_TESTING
+    // Set/read on main; the gate is captured in the immutable submitted frame.
+    static var renderGate: (() -> Void)?
+    static var renderDidComplete: ((Double, CGSize) -> Void)?
+    static var renderCompletionGate: (() -> Void)?
+    static var motionEnabled: Bool?
+    #endif
     var onLightingChange: (() -> Void)?
     private(set) var materialLights = TavernNebulaLighting.none
     private let renderer: TavernCardRenderer
-    private let metalView: MTKView
+    private let metalView: TavernNebulaMetalHost
+    private var renderWorker: TavernNebulaRenderWorker!
     private var cardSize = NSSize.zero
     private var enabled = false
     private var agentTint = SIMD4<Float>(repeating: 0)
@@ -212,15 +495,14 @@ final class TavernWorkspaceNebulaView: NSView, MTKViewDelegate {
     private var windowObservers: [NSObjectProtocol] = []
     private weak var clip: NSClipView?
     private var clipObserver: NSObjectProtocol?
-    private var seconds: Double = 0
-    private var accentLights = TavernNebulaLighting.none
+    private var suspended = true
     override var isFlipped: Bool { true }
     override var isOpaque: Bool { false }
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
     override init(frame: NSRect) {
         do { renderer = try TavernCardRenderer.shared.get() }
         catch { fatalError(error.localizedDescription) }
-        metalView = MTKView(frame: .zero, device: renderer.device)
+        metalView = TavernNebulaMetalHost(frame: .zero)
         super.init(frame: frame)
         wantsLayer = true
         guard let screen = CIFilter(name: "CIScreenBlendMode") else {
@@ -228,14 +510,23 @@ final class TavernWorkspaceNebulaView: NSView, MTKViewDelegate {
         }
         layer?.compositingFilter = screen
         setAccessibilityElement(false)
-        metalView.colorPixelFormat = .bgra8Unorm
-        metalView.clearColor = MTLClearColorMake(0, 0, 0, 0)
-        metalView.isPaused = true
-        metalView.enableSetNeedsDisplay = false
         metalView.wantsLayer = true
-        metalView.layer?.isOpaque = false
+        let metalLayer = metalView.layer as! CAMetalLayer
+        metalLayer.device = renderer.device
+        metalLayer.pixelFormat = .bgra8Unorm
+        metalLayer.isOpaque = false
+        metalLayer.framebufferOnly = true
+        metalLayer.maximumDrawableCount = 2
+        metalLayer.allowsNextDrawableTimeout = true
         metalView.setAccessibilityElement(false)
-        metalView.delegate = self
+        renderWorker = TavernNebulaRenderWorker(layer: metalLayer, renderer: renderer) { [weak self] lights, seconds, size in
+            guard let self else { return }
+            self.materialLights = lights
+            self.onLightingChange?()
+            #if TAVERN_RENDER_TESTING
+            Self.renderDidComplete?(seconds, size)
+            #endif
+        }
         addSubview(metalView)
         let center = NotificationCenter.default
         observers.append(center.addObserver(forName: .tavernMotionDidChange, object: nil, queue: .main) { [weak self] _ in self?.refresh() })
@@ -248,11 +539,13 @@ final class TavernWorkspaceNebulaView: NSView, MTKViewDelegate {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
     deinit {
+        renderWorker?.suspend()
         for token in observers { NotificationCenter.default.removeObserver(token); NSWorkspace.shared.notificationCenter.removeObserver(token) }
         for token in windowObservers { NotificationCenter.default.removeObserver(token) }
         if let clipObserver { NotificationCenter.default.removeObserver(clipObserver) }
     }
     func configure(cardSize: NSSize, kind: AgentUnreadKind?) {
+        guard self.cardSize != cardSize || agentTint != .zero || enabled != (kind != nil) else { return }
         self.cardSize = cardSize
         agentTint = .zero
         enabled = kind != nil
@@ -260,9 +553,11 @@ final class TavernWorkspaceNebulaView: NSView, MTKViewDelegate {
         refresh()
     }
     func configure(cardSize: NSSize, agentColor: NSColor) {
+        let tint = SIMD4(Float(agentColor.redComponent), Float(agentColor.greenComponent),
+                         Float(agentColor.blueComponent), 0.42)
+        guard self.cardSize != cardSize || agentTint != tint || !enabled else { return }
         self.cardSize = cardSize
-        agentTint = SIMD4(Float(agentColor.redComponent), Float(agentColor.greenComponent),
-                          Float(agentColor.blueComponent), 0.42)
+        agentTint = tint
         enabled = true
         isHidden = false
         refresh()
@@ -305,49 +600,43 @@ final class TavernWorkspaceNebulaView: NSView, MTKViewDelegate {
     }
     private func refresh() {
         let shown = visible
-        TavernWorkspaceNebulaClock.shared.setActive(self,
-            active: shown && TavernMotion.enabled)
-        if shown {
-            seconds = TavernMotion.enabled ? TavernWorkspaceNebulaClock.shared.seconds : 0
-            if agentTint.w > 0 {
-                seconds = (seconds + phaseOffset).truncatingRemainder(dividingBy: 10)
+        #if TAVERN_RENDER_TESTING
+        let animated = Self.motionEnabled ?? TavernMotion.enabled
+        #else
+        let animated = TavernMotion.enabled
+        #endif
+        TavernWorkspaceNebulaClock.shared.setActive(self, active: shown && animated)
+        guard shown else {
+            if !suspended {
+                renderWorker.suspend()
+                suspended = true
+                materialLights = .none
+                onLightingChange?()
             }
-            accentLights = renderer.nebula.lighting(seconds: seconds, size: cardSize)
-            materialLights = renderer.nebula.coupled(accentLights, seconds: seconds)
-            if agentTint.w > 0 {
-                let colour = SIMD3(pow(agentTint.x, 2.2), pow(agentTint.y, 2.2), pow(agentTint.z, 2.2))
-                for index in 0..<7 {
-                    var light = materialLights[index]
-                    light.colour = SIMD4(colour.x, colour.y, colour.z, light.colour.w)
-                    light.position.w *= index < 4 ? 0.18 : 0
-                    materialLights[index] = light
-                }
-            }
-        } else { materialLights = .none }
-        onLightingChange?()
-        if shown { metalView.draw() }
-    }
-    fileprivate func clockTick() { refresh() }
-    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
-    func draw(in view: MTKView) {
-        guard visible, let drawable = view.currentDrawable, let pass = view.currentRenderPassDescriptor,
-              let command = renderer.queue.makeCommandBuffer(), let encoder = command.makeRenderCommandEncoder(descriptor: pass) else { return }
+            return
+        }
+        suspended = false
+        let metalLayer = metalView.layer as! CAMetalLayer
+        let scale = window?.backingScaleFactor ?? 1
+        let drawableSize = CGSize(width: max(1, (bounds.width * scale).rounded()),
+                                  height: max(1, (bounds.height * scale).rounded()))
+        metalLayer.contentsScale = scale
+        if metalLayer.drawableSize != drawableSize { metalLayer.drawableSize = drawableSize }
+        var seconds = animated ? TavernWorkspaceNebulaClock.shared.seconds : 0
+        if agentTint.w > 0 { seconds = (seconds + phaseOffset).truncatingRemainder(dividingBy: 10) }
         let clipped = bounds.intersection(visibleRect)
-        var uniforms = TavernNebulaUniforms(geometry: SIMD4(Float(bounds.width), Float(bounds.height), Float(cardSize.width), Float(cardSize.height)),
-            timing: SIMD4(Float(seconds), Float(Int((seconds * 24).rounded()) % 240), Float(Self.padding + 3), 0),
+        let uniforms = TavernNebulaUniforms(
+            geometry: SIMD4(Float(bounds.width), Float(bounds.height), Float(cardSize.width), Float(cardSize.height)),
+            timing: SIMD4(Float(seconds), 0, Float(Self.padding + 3), 0),
             clip: SIMD4(Float(clipped.minX), Float(clipped.minY), Float(clipped.maxX), Float(clipped.maxY)),
             tint: agentTint)
-        var lights = accentLights
-        encoder.setRenderPipelineState(renderer.nebula.pipeline)
-        encoder.setFragmentBytes(&uniforms, length: MemoryLayout<TavernNebulaUniforms>.stride, index: 0)
-        encoder.setFragmentBytes(&lights, length: MemoryLayout<TavernNebulaLighting>.stride, index: 1)
-        encoder.setFragmentTexture(renderer.nebula.atlas, index: 0)
-        encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-        encoder.endEncoding()
-        command.present(drawable)
-        command.addCompletedHandler { command in
-            if command.status == .error { fatalError(L("core.card.renderFailed", String(describing: command.error))) }
-        }
-        command.commit()
+        var frame = TavernNebulaRenderWorker.Frame(uniforms: uniforms, cardSize: cardSize,
+                                                  drawableSize: drawableSize, animated: animated)
+        #if TAVERN_RENDER_TESTING
+        frame.gate = Self.renderGate
+        frame.completionGate = Self.renderCompletionGate
+        #endif
+        renderWorker.submit(frame)
     }
+    fileprivate func clockTick() { refresh() }
 }

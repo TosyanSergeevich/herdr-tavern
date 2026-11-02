@@ -189,3 +189,7 @@
 "shell.workspace.new" = "New workspace";
 "shell.workspace.new.menu" = "New workspace…";
 "shell.workspaces" = "Workspaces";
+"shell.performance.export" = "Save Performance Diagnostics…";
+"shell.performance.export.error" = "Could not save diagnostics";
+"shell.performance.benchmark.error" = "Unsafe benchmark environment. A private directory with mode 0700 and an explicit client socket are required.";
+"shell.performance.mark" = "Mark a Slowdown Now";

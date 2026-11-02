@@ -88,6 +88,7 @@ final class RustConnection {
     private struct PendingWrite {
         var command: [String: Any]
         var completions: [(Error?) -> Void]
+        let queuedAt: UInt64
     }
     private var pendingWrites: [PendingWrite?] = []
     private var writeHead = 0
@@ -120,10 +121,16 @@ final class RustConnection {
                         return false
                     }
                     let decoded: Result<NativeEvent, Error>
+                    let decodeSpan = TavernPerformance.shared.begin(.eventDecode)
                     do { decoded = .success(try NativeEvent(taking: event)) } catch { decoded = .failure(error) }
+                    TavernPerformance.shared.end(decodeSpan)
+                    let handoffStarted = DispatchTime.now().uptimeNanoseconds
                     // Bounded hand-off: reader never queues unbounded full surfaces. No UI
                     // thread waits for this worker; detach interrupts next_event separately.
-                    DispatchQueue.main.sync { receive(decoded) }
+                    DispatchQueue.main.sync {
+                        TavernPerformance.shared.duration(.mainHandoff, nanoseconds: DispatchTime.now().uptimeNanoseconds - handoffStarted)
+                        receive(decoded)
+                    }
                     return true
                 }
             }
@@ -189,8 +196,10 @@ final class RustConnection {
             pendingWrites[last]?.command = captured
             pendingWrites[last]?.completions.append(completion)
         } else {
-            pendingWrites.append(PendingWrite(command: captured, completions: [completion]))
+            pendingWrites.append(PendingWrite(command: captured, completions: [completion],
+                                             queuedAt: DispatchTime.now().uptimeNanoseconds))
         }
+        TavernPerformance.shared.gauge(.writerQueue, Double(pendingWrites.count - writeHead))
         if !draining {
             draining = true
             calls.enter()
@@ -208,6 +217,7 @@ final class RustConnection {
                     guard !closing, writeHead < pendingWrites.count else {
                         pendingWrites.removeAll(keepingCapacity: true)
                         writeHead = 0; draining = false
+                        TavernPerformance.shared.gauge(.writerQueue, 0)
                         lock.unlock()
                         return
                     }
@@ -218,7 +228,9 @@ final class RustConnection {
                         pendingWrites.removeFirst(writeHead)
                         writeHead = 0
                     }
+                    TavernPerformance.shared.gauge(.writerQueue, Double(pendingWrites.count - writeHead))
                     lock.unlock()
+                    TavernPerformance.shared.duration(.writerQueueWait, nanoseconds: DispatchTime.now().uptimeNanoseconds - entry.queuedAt)
                     let failure: Error? = autoreleasepool {
                         #if TAVERN_RENDER_TESTING
                         serializationGate?(entry.command)
@@ -226,18 +238,23 @@ final class RustConnection {
                         lock.lock(); let closedBeforeEncoding = closing; lock.unlock()
                         guard !closedBeforeEncoding else { return NativeError.message(L("core.connection.closed")) }
                         do {
-                            // Darwin Foundation raises an Objective-C exception
-                            // for unsupported objects; Swift catch cannot handle it.
-                            guard JSONSerialization.isValidJSONObject(entry.command) else {
-                                return CocoaError(.propertyListWriteInvalid)
-                            }
-                            let data = try JSONSerialization.data(withJSONObject: entry.command)
+                            let data: Data = try {
+                                let encodeSpan = TavernPerformance.shared.begin(.writerEncode)
+                                defer { TavernPerformance.shared.end(encodeSpan) }
+                                // Reject unsupported objects before Foundation can raise an exception.
+                                guard JSONSerialization.isValidJSONObject(entry.command) else {
+                                    throw CocoaError(.propertyListWriteInvalid)
+                                }
+                                return try JSONSerialization.data(withJSONObject: entry.command)
+                            }()
                             lock.lock(); let closedBeforeSending = closing; lock.unlock()
                             guard !closedBeforeSending else { return NativeError.message(L("core.connection.closed")) }
                             var error: UnsafeMutablePointer<CChar>?
+                            let sendSpan = TavernPerformance.shared.begin(.wireSend)
                             let result = data.withUnsafeBytes { bytes in
                                 tavern_client_send_json(pointer, bytes.bindMemory(to: UInt8.self).baseAddress, bytes.count, &error)
                             }
+                            TavernPerformance.shared.end(sendSpan)
                             return result == 0 ? nil : NativeError.message(ownedString(error))
                         } catch { return error }
                     }
@@ -256,6 +273,7 @@ final class RustConnection {
         for entry in pendingWrites[writeHead...] { if let entry { abandoned.append(contentsOf: entry.completions) } }
         pendingWrites.removeAll()
         writeHead = 0
+        TavernPerformance.shared.gauge(.writerQueue, 0)
         calls.enter()
         lock.unlock()
         if !abandoned.isEmpty { Self.complete(abandoned, with: NativeError.message(L("core.connection.closed"))) }

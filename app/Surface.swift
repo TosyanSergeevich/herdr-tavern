@@ -45,6 +45,7 @@ final class SurfaceView: NSView, NSTextInputClient {
     private var placements: [[String: Any]] = []
     var send: (([String: Any]) -> Void)?
     var request: ((String, [String: Any]) -> Void)?
+    var scrollBy: ((String, Int) -> Void)?
     let commandKeybindings = CommandKeybindings()
     var invokeCommand: ((String, [String: Any]?) -> Void)?
     var focusPane: ((String) -> Void)?
@@ -55,6 +56,9 @@ final class SurfaceView: NSView, NSTextInputClient {
     var readSelection: (([String: Any], @escaping (Result<String, Error>) -> Void) -> Void)?
     var selectionError: ((String) -> Void)?
     var geometryChanged: ((Int, Int, Int, Int) -> Void)?
+    // Main-thread, opt-in bridge; called only after an actual AppKit draw.
+    var onPerformanceDraw: (() -> Void)?
+    var hasLocalSelection: Bool { selection != nil }
     private var selection: TerminalSelection?
     private var selectionVersion: UInt64 = 0
     private var selecting = false
@@ -67,7 +71,7 @@ final class SurfaceView: NSView, NSTextInputClient {
     private var interpretingComposition = false
     private var reportedButtons: [Int: String] = [:]
     private var tracking: NSTrackingArea?
-    private var scrollRemainder: CGFloat = 0
+    private var scrollRemainder = TerminalScrollRemainder()
     private var dragSplit: [String: Any]?
     private var dragPane = ""
     private var dragBoot = ""
@@ -252,6 +256,7 @@ final class SurfaceView: NSView, NSTextInputClient {
     }
     func clear() {
         cancelLinkHover()
+        scrollRemainder.reset()
         hoverResolver.invalidate()
         hoverRowGenerations.removeAll()
         clearInputSelection()
@@ -265,6 +270,8 @@ final class SurfaceView: NSView, NSTextInputClient {
     }
     func apply(metadata: [String: Any], segments: [CellSegment], images decoded: [String: CGImage], patch: Bool) throws {
         precondition(Thread.isMainThread)
+        let performanceSpan = TavernPerformance.shared.begin(.surfaceApply)
+        defer { TavernPerformance.shared.end(performanceSpan) }
         let w = patch ? width : integer(metadata["width"])
         let h = patch ? height : integer(metadata["height"])
         if patch {
@@ -314,6 +321,9 @@ final class SurfaceView: NSView, NSTextInputClient {
             for segment in segments where !segment.cells.isEmpty { changedRows.insert(segment.y) }
         } else {
             let nextPane = string(objects(metadata["panes"]).first(where: { flag($0["focused"]) })?["pane_id"])
+            if string(scene["boot_id"]) != string(metadata["boot_id"]) || nextPane != focusedPane {
+                scrollRemainder.reset()
+            }
             if string(scene["boot_id"]) != string(metadata["boot_id"]) { pressedKeys.removeAll() }
             else if nextPane != focusedPane { releasePressedKeys() }
         }
@@ -380,6 +390,8 @@ final class SurfaceView: NSView, NSTextInputClient {
             invalidate([bounds])
         }
         refreshLinkHover()
+        TavernPerformance.shared.count(patch ? .patchFrames : .fullFrames)
+        TavernPerformance.shared.count(.frameCells, segments.reduce(UInt64(0)) { $0 + UInt64($1.cells.count) })
     }
     private func colors(_ cell: TerminalCell) -> (NSColor, NSColor) {
         var fg = packedColor(cell.foreground, foreground: true), bg = packedColor(cell.background, foreground: false)
@@ -660,9 +672,9 @@ final class SurfaceView: NSView, NSTextInputClient {
         return rect.insetBy(dx: -pixel, dy: -pixel)
             .offsetBy(dx: number(cursor["x"]) * cellWidth, dy: number(cursor["y"]) * cellHeight)
     }
-    private func drawGlyph(at index: Int, foreground: NSColor, context: CGContext) {
+    private func drawGlyph(at index: Int, foreground: NSColor, context: CGContext) -> UInt64 {
         let cell = cells[index], modifier = cell.modifier
-        guard !cell.skip, modifier & 128 == 0, !cell.symbol.isEmpty else { return }
+        guard !cell.skip, modifier & 128 == 0, !cell.symbol.isEmpty else { return 0 }
         let x = index % width, y = index / width
         if cell.symbol != " " {
             let glyph = glyph(for: cell, columns: glyphGeometry(at: index).columns)
@@ -682,18 +694,33 @@ final class SurfaceView: NSView, NSTextInputClient {
             }
             path.stroke()
         }
+        return cell.symbol == " " ? 0 : 1
     }
-    private func drawOverlay(from start: Int, through end: Int, foreground: NSColor, background: NSColor, context: CGContext) {
+    private func drawOverlay(from start: Int, through end: Int, foreground: NSColor, background: NSColor, context: CGContext) -> UInt64 {
         let rect = NSRect(x: CGFloat(start % width) * cellWidth, y: CGFloat(start / width) * cellHeight,
                           width: CGFloat(end - start + 1) * cellWidth, height: cellHeight)
         context.saveGState(); defer { context.restoreGState() }
         context.clip(to: rect); background.setFill(); rect.fill()
+        var glyphs: UInt64 = 0
         forEachGlyph(intersecting: rect.intersection(context.boundingBoxOfClipPath)) {
-            drawGlyph(at: $0, foreground: foreground, context: context)
+            glyphs += drawGlyph(at: $0, foreground: foreground, context: context)
         }
+        return glyphs
     }
     override func draw(_ dirtyRect: NSRect) {
         guard let context = NSGraphicsContext.current?.cgContext else { return }
+        let performanceSpan = TavernPerformance.shared.begin(.surfaceDraw)
+        var glyphs: UInt64 = 0
+        defer {
+            TavernPerformance.shared.count(.drawGlyphs, glyphs)
+            TavernPerformance.shared.end(performanceSpan)
+            onPerformanceDraw?()
+        }
+        let drawn = dirtyRect.intersection(bounds)
+        if !drawn.isNull {
+            let scale = window?.backingScaleFactor ?? 1
+            TavernPerformance.shared.count(.drawAreaPixels, UInt64(max(0, (drawn.width * drawn.height * scale * scale).rounded())))
+        }
         context.saveGState(); defer { context.restoreGState() }
         context.clip(to: dirtyRect)
         TerminalTheme.background.setFill(); bounds.fill()
@@ -727,20 +754,20 @@ final class SurfaceView: NSView, NSTextInputClient {
         } }
         drawImages(negative: true, dirtyRect: dirtyRect, context: context)
         forEachGlyph(intersecting: dirtyRect) { index in
-            drawGlyph(at: index, foreground: drawingColors(cells[index]).0, context: context)
+            glyphs += drawGlyph(at: index, foreground: drawingColors(cells[index]).0, context: context)
         }
         drawImages(negative: false, dirtyRect: dirtyRect, context: context)
         for y in y0..<y1 {
             if let columns = selection?.visibleColumns(row: y) {
                 let start = y * width + columns.lowerBound, end = y * width + columns.upperBound
-                drawOverlay(from: start, through: end, foreground: TerminalTheme.selectionText, background: TerminalTheme.selection, context: context)
+                glyphs += drawOverlay(from: start, through: end, foreground: TerminalTheme.selectionText, background: TerminalTheme.selection, context: context)
             }
         }
         let cursor = dictionary(scene["cursor"])
         if let rect = cursorRect(in: scene), rect.intersects(dirtyRect) {
             let x = integer(cursor["x"]), y = integer(cursor["y"]), shape = integer(cursor["shape"])
             if shape != 3 && shape != 4 && shape != 5 && shape != 6 {
-                drawOverlay(from: y * width + x, through: y * width + x, foreground: TerminalTheme.cursorText, background: TerminalTheme.cursor, context: context)
+                glyphs += drawOverlay(from: y * width + x, through: y * width + x, foreground: TerminalTheme.cursorText, background: TerminalTheme.cursor, context: context)
             } else {
                 TerminalTheme.cursor.setFill(); rect.fill()
             }
@@ -1080,17 +1107,19 @@ final class SurfaceView: NSView, NSTextInputClient {
         }
     }
     override func scrollWheel(with event: NSEvent) {
+        TavernPerformance.shared.count(.scrollInputs)
         cancelLinkHover()
-        scrollRemainder += event.hasPreciseScrollingDeltas ? event.scrollingDeltaY / cellHeight : event.scrollingDeltaY
-        let delta = Int(scrollRemainder)
-        guard delta != 0, let pane = paneAt(cellAt(event)) else { return }
-        scrollRemainder -= CGFloat(delta)
+        guard let pane = paneAt(cellAt(event)) else { scrollRemainder.reset(); return }
+        let reporting = flag(pane["mouse_reporting"]) && !event.modifierFlags.contains(.shift)
+        let context = [string(scene["boot_id"]), string(pane["pane_id"]),
+                       String(flag(pane["alternate_screen_active"])), String(reporting)].joined(separator: ":")
+        let lines = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY / cellHeight : event.scrollingDeltaY
+        let delta = scrollRemainder.consume(Double(lines), context: context)
+        guard delta != 0 else { TavernPerformance.shared.count(.scrollFractional); return }
         if flag(pane["mouse_reporting"]) && !event.modifierFlags.contains(.shift) {
             mouse(event, phase: delta > 0 ? "upward" : "downward", lines: min(65535, abs(delta)))
         } else {
-            let scroll = dictionary(pane["scroll"])
-            let offset = max(0, min(integer(scroll["max_offset_from_bottom"]), integer(scroll["offset_from_bottom"]) + delta))
-            request?("pane.scroll", ["pane_id": string(pane["pane_id"]), "offset_from_bottom": offset])
+            scrollBy?(string(pane["pane_id"]), delta)
         }
     }
     private func text(from start: Int, through end: Int, trim: Bool) -> String {

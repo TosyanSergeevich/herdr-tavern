@@ -104,6 +104,21 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     private var resumeRequested = false
     private var requests: [EndpointAction] = []
     private var inFlight: EndpointAction?
+    private var scrollIntent = TerminalScrollIntent()
+    private var endpointQueuedAt: [String: UInt64] = [:]
+    private var endpointStartedAt: UInt64?
+    private var pendingTabTimings: [(boot: String, tab: String, started: UInt64)] = []
+    private var performanceContextTimer: Timer?
+    private var benchmarkBridge: TavernBenchmarkBridge?
+    private var benchmarkDrawSequence: UInt64 = 0
+    private var benchmarkDrawTime: UInt64 = 0
+    private var benchmarkDrawTab = ""
+    private var benchmarkDrawPane = ""
+    private var benchmarkWaitTimer: Timer?
+    private var benchmarkScrollSerial: UInt64 = 0
+    private var benchmarkScrollTarget = 0
+    private var benchmarkScrollRequestID = ""
+    private var benchmarkScrollAcknowledged: (offset: Int, maximum: Int)?
     private var requestTimeout: Timer?
     private var lastGeometry = ""
     private var geometryRequest: UInt64 = 0
@@ -152,6 +167,7 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         do {
             launchOptions = try LaunchOptions.parse(CommandLine.arguments)
             options = launchOptions
+            TavernPerformance.shared.start()
         }
         catch { showStartupError(error.localizedDescription); return }
         let fonts: TerminalFonts
@@ -246,7 +262,11 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             self?.lastErrorLocalization = nil; self?.lastError = message; self?.updateStatus()
         }
         notifications.onOpen = { [weak self] context in self?.openNotification(context) }
-        notifications.prepare()
+        // Disposable benchmark identities must not request OS permissions or
+        // introduce notification prompts into a measured interaction.
+        if ProcessInfo.processInfo.environment["TAVERN_BENCHMARK_DIRECTORY"] == nil {
+            notifications.prepare()
+        }
         popupSurface.send = { [weak self] command in
             guard let self, !self.popupID.isEmpty else { return }
             var command = command; command.removeValue(forKey: "pane_id"); command["terminal_id"] = self.popupID
@@ -254,6 +274,7 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         }
         window.center(); window.makeKeyAndOrderFront(nil); window.makeFirstResponder(surface)
         NSApp.activate(ignoringOtherApps: true)
+        configurePerformance()
         connect()
         DispatchQueue.main.async { [weak self] in self?.offerAgentSetup() }
     }
@@ -274,6 +295,12 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         view.send = { [weak self] command in self?.send(command) }
         view.invokeCommand = { [weak self] id, selection in self?.invokeConfiguredCommand(id, selection: selection) }
         view.request = { [weak self] method, params in self?.request(method, params) }
+        if view === surface {
+            view.onPerformanceDraw = { [weak self] in self?.performanceDidDraw() }
+        }
+        view.scrollBy = { [weak self] pane, delta in
+            self?.request("pane.scroll", ["pane_id": pane], scrollDelta: delta)
+        }
         view.focusPane = { [weak self] id in self?.request("pane.focus", ["pane_id": id]) }
         view.contextMenuForPane = { [weak self] id in self?.paneContextMenu(id) }
         view.presentContextMenu = { TavernContextMenu.popUp($0, with: $1, for: $2) }
@@ -438,6 +465,7 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         prepareSettings().showAgents()
     }
     private func offerAgentSetup() {
+        guard benchmarkBridge == nil else { return }
         let key = "HerdrTavern.agentSetup.offered.v1"
         guard !UserDefaults.standard.bool(forKey: key) else { return }
         UserDefaults.standard.set(true, forKey: key)
@@ -541,6 +569,10 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         let app = menu("Herdr Tavern", parent: main)
         let settings = NSMenuItem(title: L("shell.settings.menu"), action: #selector(showSettings(_:)), keyEquivalent: ",")
         settings.target = self; app.addItem(settings); app.addItem(.separator())
+        let markPerformance = NSMenuItem(title: L("shell.performance.mark"), action: #selector(markPerformanceIncident(_:)), keyEquivalent: "")
+        markPerformance.target = self; app.addItem(markPerformance)
+        let performance = NSMenuItem(title: L("shell.performance.export"), action: #selector(exportPerformance(_:)), keyEquivalent: "")
+        performance.target = self; app.addItem(performance); app.addItem(.separator())
         let quit = NSMenuItem(title: L("shell.quit"), action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         app.addItem(quit)
         let session = menu(L("shell.session"), parent: main)
@@ -641,6 +673,9 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             })
     }
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item.action == #selector(exportPerformance(_:)) || item.action == #selector(markPerformanceIncident(_:)) {
+            return TavernPerformance.shared.isEnabled && window?.attachedSheet == nil
+        }
         let action = item.identifier?.rawValue ?? ""
         if action == "reconnect" { return !attached && !connecting }
         if action == "sidebar.toggle" { return true }
@@ -722,6 +757,8 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         }
     }
     private func rebuildNavigation() {
+        let performanceSpan = TavernPerformance.shared.begin(.navigationRebuild)
+        defer { TavernPerformance.shared.end(performanceSpan) }
         guard surface != nil else { return }
         let distanceFromTop = max(0, sidebar.bounds.height - sidebarScroll.documentVisibleRect.maxY)
         var appearing: [NSView] = []
@@ -927,6 +964,8 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         titleFeed?.close(); titleFeed = nil
         titleUpdates = AgentTitleUpdates()
         requests.removeAll(); inFlight = nil; requestTimeout?.invalidate(); requestTimeout = nil
+        endpointQueuedAt.removeAll(); endpointStartedAt = nil; pendingTabTimings.removeAll()
+        scrollIntent.reset()
         pendingSnapshot = nil
         snapshot = [:]; surface.clear(); popupSurface.clear(); popupContainer.isHidden = true; surface.isHidden = true
         lastGeometry = ""; navigationPresentation = nil; paneGripLayoutKey = nil; resumeRequested = false
@@ -1007,6 +1046,8 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         navigationDrag.cancel()
         for grip in paneGrips.values { grip.isHidden = true }
         requestTimeout?.invalidate(); requestTimeout = nil; inFlight = nil; requests.removeAll()
+        endpointQueuedAt.removeAll(); endpointStartedAt = nil; pendingTabTimings.removeAll()
+        scrollIntent.reset()
         pendingSnapshot = nil
         popupContainer.isHidden = true; surface.isHidden = true
         localizedError { L("shell.error.disconnected", message()) }; rebuildNavigation()
@@ -1047,27 +1088,112 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         if string(command["action"]) == "PluginAction", let selection { params["selection"] = selection }
         request("command.invoke", params)
     }
-    private func request(_ method: String, _ params: [String: Any], completion: (([String: Any]) -> Void)? = nil) {
+    private func scrollContext(for pane: [String: Any]) -> TerminalScrollIntent.Context {
+        TerminalScrollIntent.Context(boot: string(surface.scene["boot_id"]), pane: string(pane["pane_id"]),
+            focusedPane: string(objects(surface.scene["panes"]).first(where: { flag($0["focused"]) })?["pane_id"]),
+            alternateScreen: flag(pane["alternate_screen_active"]))
+    }
+    private func synchronizeScrollIntent() {
+        guard let context = scrollIntent.context else { return }
+        guard let pane = objects(surface.scene["panes"]).first(where: { string($0["pane_id"]) == context.pane }),
+              !dictionary(pane["scroll"]).isEmpty else { scrollIntent.reset(); return }
+        let scroll = dictionary(pane["scroll"])
+        scrollIntent.observe(scrollContext(for: pane), offset: integer(scroll["offset_from_bottom"]),
+                             maximum: integer(scroll["max_offset_from_bottom"]))
+        refreshQueuedScrollTargets()
+    }
+    private func refreshQueuedScrollTargets() {
+        for index in requests.indices {
+            guard let target = scrollIntent.target(for: requests[index].id) else { continue }
+            let action = requests[index]
+            var params = action.params; params["offset_from_bottom"] = target
+            requests[index] = EndpointAction(id: action.id, boot: action.boot, method: action.method,
+                                             params: params, completion: action.completion)
+        }
+    }
+    private func request(_ method: String, _ params: [String: Any], scrollDelta: Int? = nil,
+                         completion: (([String: Any]) -> Void)? = nil) {
         let boot = string(snapshot["boot_id"])
         guard attached, !boot.isEmpty else { localizedError { L("shell.error.noSession") }; return }
-        let action = EndpointAction(id: UUID().uuidString, boot: boot, method: method, params: params, completion: completion)
-        if method == "layout.set_split_ratio", let index = requests.lastIndex(where: { $0.method == method && string($0.params["pane_id"]) == string(params["pane_id"]) }) {
-            requests[index] = action
+        let id = UUID().uuidString
+        let queuedAt = DispatchTime.now().uptimeNanoseconds
+        var params = params
+        var replacement: Int?
+        if method == "pane.scroll" {
+            let paneID = string(params["pane_id"])
+            guard string(surface.scene["boot_id"]) == boot,
+                  let pane = objects(surface.scene["panes"]).first(where: { string($0["pane_id"]) == paneID }),
+                  !dictionary(pane["scroll"]).isEmpty else { scrollIntent.reset(); return }
+            let scroll = dictionary(pane["scroll"])
+            scrollIntent.observe(scrollContext(for: pane), offset: integer(scroll["offset_from_bottom"]),
+                                 maximum: integer(scroll["max_offset_from_bottom"]))
+            // Only replace the immediate tail, never an earlier request across
+            // a command, a different pane, a boot or a completion callback.
+            if completion == nil, let tail = requests.last, tail.completion == nil,
+               tail.method == method, tail.boot == boot, string(tail.params["pane_id"]) == paneID,
+               scrollIntent.canReplace(boot: boot, pane: paneID, id: tail.id) {
+                replacement = requests.count - 1
+                endpointQueuedAt.removeValue(forKey: tail.id)
+                TavernPerformance.shared.count(.scrollCoalesced)
+            }
+            guard replacement != nil || requests.count < 64 else {
+                TavernPerformance.shared.count(.requestsRejected)
+                localizedError { L("shell.error.queueFull") }; return
+            }
+            params["offset_from_bottom"] = scrollIntent.enqueue(id: id, delta: scrollDelta,
+                absolute: params["offset_from_bottom"].map { integer($0) },
+                replacing: replacement.map { requests[$0].id })
+            benchmarkScrollSerial &+= 1
+            benchmarkScrollTarget = integer(params["offset_from_bottom"])
+            if benchmarkBridge != nil {
+                benchmarkScrollRequestID = id
+                benchmarkScrollAcknowledged = nil
+            }
         } else {
-            guard requests.count < 64 else { localizedError { L("shell.error.queueFull") }; return }
+            scrollIntent.reset()
+            if method == "layout.set_split_ratio" {
+                replacement = requests.lastIndex(where: { $0.method == method && string($0.params["pane_id"]) == string(params["pane_id"]) })
+            }
+        }
+        let action = EndpointAction(id: id, boot: boot, method: method, params: params, completion: completion)
+        if let replacement {
+            endpointQueuedAt.removeValue(forKey: requests[replacement].id)
+            requests[replacement] = action
+        } else {
+            guard requests.count < 64 else {
+                TavernPerformance.shared.count(.requestsRejected)
+                localizedError { L("shell.error.queueFull") }; return
+            }
             requests.append(action)
         }
+        endpointQueuedAt[id] = queuedAt
+        TavernPerformance.shared.gauge(.endpointQueue, Double(requests.count))
         pumpRequests()
     }
     private func pumpRequests() {
         guard attached, inFlight == nil, !requests.isEmpty else { return }
         let action = requests.removeFirst()
+        let queued = endpointQueuedAt.removeValue(forKey: action.id)
         guard action.boot == string(snapshot["boot_id"]) else { localizedError { L("shell.error.sessionChanged") }; pumpRequests(); return }
         inFlight = action
+        let now = DispatchTime.now().uptimeNanoseconds
+        if let queued {
+            TavernPerformance.shared.duration(.endpointQueueWait, nanoseconds: now &- queued)
+        }
+        endpointStartedAt = now
+        TavernPerformance.shared.gauge(.endpointQueue, Double(requests.count))
+        if action.method == "tab.focus" {
+            if pendingTabTimings.count == 64 { pendingTabTimings.removeFirst() }
+            pendingTabTimings.append((action.boot, string(action.params["tab_id"]), now))
+        }
         let command: [String: Any] = ["type":"request", "request_id":action.id, "boot_id":action.boot, "method":action.method, "params":action.params]
         send(command) { [weak self] sent in
             guard let self, self.inFlight?.id == action.id else { return }
-            if !sent { self.inFlight = nil; self.requests.removeAll(); return }
+            if !sent {
+                self.inFlight = nil; self.requests.removeAll(); self.scrollIntent.reset()
+                self.endpointQueuedAt.removeAll(); self.endpointStartedAt = nil; self.pendingTabTimings.removeAll()
+                return
+            }
             self.requestTimeout = Timer.scheduledTimer(withTimeInterval: 16, repeats: false) { [weak self] _ in
                 guard let self, self.inFlight?.id == action.id else { return }
                 self.disconnect { L("shell.error.requestTimeout", action.method) }
@@ -1076,11 +1202,16 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     }
     private func receive(_ event: NativeEvent) {
         precondition(Thread.isMainThread)
+        let performanceSpan = TavernPerformance.shared.begin(.eventReceive)
+        TavernPerformance.shared.count(.events)
+        defer { TavernPerformance.shared.end(performanceSpan) }
         switch event.kind {
         case UInt32(TAVERN_SNAPSHOT):
             let oldBoot = string(snapshot["boot_id"]), newBoot = string(event.metadata["boot_id"])
             if !oldBoot.isEmpty && oldBoot != newBoot {
                 requests.removeAll(); inFlight = nil; requestTimeout?.invalidate(); requestTimeout = nil; surface.clear()
+                endpointQueuedAt.removeAll(); endpointStartedAt = nil; pendingTabTimings.removeAll()
+                scrollIntent.reset()
                 snapshot = [:]
                 titleFeed?.close(); titleFeed = nil
                 titleUpdates = AgentTitleUpdates()
@@ -1094,6 +1225,7 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         case UInt32(TAVERN_FULL), UInt32(TAVERN_PATCH):
             do {
                 try surface.apply(metadata: event.metadata, segments: event.segments, images: event.images, patch: event.kind == UInt32(TAVERN_PATCH))
+                synchronizeScrollIntent()
                 if event.kind == UInt32(TAVERN_FULL) { try installPopup(event) }
                 publishPendingSnapshot()
                 updateVisibility()
@@ -1103,12 +1235,32 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
                   string(event.metadata["request_id"]) == action.id, string(event.metadata["boot_id"]) == action.boot else {
                 localizedError { L("shell.error.responseMismatch") }; return
             }
+            if let started = endpointStartedAt {
+                TavernPerformance.shared.duration(.endpointRoundTrip, nanoseconds: DispatchTime.now().uptimeNanoseconds &- started)
+            }
+            endpointStartedAt = nil
             requestTimeout?.invalidate(); requestTimeout = nil; inFlight = nil
             let response = dictionary(event.metadata["response"]), rejection = dictionary(response["error"])
             if !rejection.isEmpty {
                 error("\(action.method): \(string(rejection["message"])) (\(string(rejection["code"])))")
                 requests.removeAll()
-            } else { action.completion?(dictionary(response["result"])) }
+                endpointQueuedAt.removeAll(); pendingTabTimings.removeAll()
+                scrollIntent.reset()
+            } else {
+                if action.method == "pane.scroll" {
+                    let pane = dictionary(dictionary(response["result"])["pane"])
+                    let scroll = dictionary(pane["scroll"])
+                    if string(pane["pane_id"]) == string(action.params["pane_id"]), !scroll.isEmpty {
+                        scrollIntent.acknowledge(id: action.id, offset: integer(scroll["offset_from_bottom"]),
+                                                 maximum: integer(scroll["max_offset_from_bottom"]))
+                        if action.id == benchmarkScrollRequestID {
+                            benchmarkScrollAcknowledged = (integer(scroll["offset_from_bottom"]), integer(scroll["max_offset_from_bottom"]))
+                        }
+                        refreshQueuedScrollTargets()
+                    } else { scrollIntent.reset() }
+                }
+                action.completion?(dictionary(response["result"]))
+            }
             pumpRequests()
         case UInt32(TAVERN_NOTICE): handleNotice(event.metadata)
         case UInt32(TAVERN_ERROR):
@@ -1554,6 +1706,9 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         terminated = true; generation += 1
         navigationDrag.cancel()
         soundPlayer.stop()
+        benchmarkWaitTimer?.invalidate(); benchmarkWaitTimer = nil; benchmarkBridge = nil
+        performanceContextTimer?.invalidate(); performanceContextTimer = nil
+        TavernPerformance.shared.stop()
         requestTimeout?.invalidate(); requests.removeAll(); inFlight = nil
         connection?.close(); connection = nil
         titleFeed?.close(); titleFeed = nil
@@ -1890,3 +2045,256 @@ application.setActivationPolicy(.regular)
 let delegate = TavernDelegate()
 application.delegate = delegate
 application.run()
+
+private extension TavernDelegate {
+    func configurePerformance() {
+        if TavernPerformance.shared.isEnabled {
+            let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in self?.updatePerformanceContext() }
+            performanceContextTimer = timer
+            RunLoop.main.add(timer, forMode: .common)
+            updatePerformanceContext()
+        }
+        guard let path = ProcessInfo.processInfo.environment["TAVERN_BENCHMARK_DIRECTORY"] else { return }
+        guard options?.connectOnly == true,
+              Bundle.main.bundleIdentifier?.hasPrefix("local.herdr.tavern.performance.") == true else {
+            showStartupError(L("shell.performance.benchmark.error")); return
+        }
+        do {
+            // This is a disposable benchmark preference domain, never the user's.
+            soundSettings.enabled = false
+            benchmarkBridge = try TavernBenchmarkBridge(directory: URL(fileURLWithPath: path)) { [weak self] command, reply in
+                guard let self, !self.terminated else { reply(.failure(.unavailable)); return }
+                self.benchmarkCommand(command, reply: reply)
+            }
+        } catch { showStartupError(L("shell.performance.benchmark.error")) }
+    }
+
+    func updatePerformanceContext() {
+        guard let window else { return }
+        let recorder = TavernPerformance.shared
+        recorder.gauge(.tabs, Double(objects(snapshot["tabs"]).count))
+        recorder.gauge(.panes, Double(objects(snapshot["panes"]).count))
+        recorder.gauge(.visibleCards, Double(sidebarButtons.values.lazy.filter {
+            !$0.isHiddenOrHasHiddenAncestor && !$0.visibleRect.isEmpty
+        }.count))
+        recorder.gauge(.windowWidth, Double(window.contentView?.bounds.width ?? 0))
+        recorder.gauge(.windowHeight, Double(window.contentView?.bounds.height ?? 0))
+        recorder.gauge(.backingScale, Double(window.backingScaleFactor))
+        recorder.gauge(.refreshHz, Double(window.screen?.maximumFramesPerSecond ?? 0))
+        recorder.gauge(.animationsEnabled, TavernMotionSettings.shared.enabled ? 1 : 0)
+        recorder.gauge(.appVisible, window.isVisible && window.occlusionState.contains(.visible) && !NSApp.isHidden ? 1 : 0)
+    }
+
+    func performanceDidDraw() {
+        let now = DispatchTime.now().uptimeNanoseconds
+        let boot = string(surface.scene["boot_id"])
+        guard boot == string(snapshot["boot_id"]),
+              integer(surface.scene["projection_revision"]) == integer(snapshot["revision"]) else { return }
+        let tab = string(snapshot["focused_tab_id"])
+        for timing in pendingTabTimings where timing.boot == boot && timing.tab == tab {
+            TavernPerformance.shared.duration(.tabSwitch, nanoseconds: now &- timing.started)
+        }
+        pendingTabTimings.removeAll { $0.boot != boot || $0.tab == tab }
+        guard benchmarkBridge != nil else { return }
+        benchmarkDrawSequence &+= 1
+        benchmarkDrawTime = now
+        benchmarkDrawTab = tab
+        benchmarkDrawPane = string(snapshot["focused_pane_id"])
+    }
+
+    @objc func markPerformanceIncident(_ sender: Any?) {
+        TavernPerformance.shared.markIncident()
+    }
+
+    @objc func exportPerformance(_ sender: Any?) {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "tavern-performance.json"
+        panel.title = L("shell.performance.export")
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard let self, response == .OK, let url = panel.url else { return }
+            TavernPerformance.shared.export(to: url) { [weak self] result in
+                switch result {
+                case .success(let output): NSWorkspace.shared.activateFileViewerSelecting([output])
+                case .failure:
+                    guard let self else { return }
+                    let alert = TavernDialog()
+                    alert.messageText = L("shell.performance.export.error")
+                    alert.addButton(withTitle: L("shell.close"))
+                    alert.beginSheetModal(for: self.window)
+                }
+            }
+        }
+    }
+
+    func benchmarkInspect() -> [String: Any] {
+        let session = CGSessionCopyCurrentDictionary() as? [String: Any]
+        // macOS omits the lock key for an unlocked session. A missing session
+        // dictionary remains unknown/unsafe, unlike an absent lock flag.
+        let locked = session.map { $0["CGSSessionScreenIsLocked"] as? Bool ?? false } ?? true
+        let ready = attached && !surface.isHidden && !snapshot.isEmpty
+            && string(surface.scene["boot_id"]) == string(snapshot["boot_id"])
+            && integer(surface.scene["projection_revision"]) == integer(snapshot["revision"])
+        let pane = objects(surface.scene["panes"]).first { flag($0["focused"]) } ?? [:]
+        let scroll = dictionary(pane["scroll"])
+        let rect = surface.convert(surface.bounds, to: nil)
+        return [
+            "ready": ready, "visible": window.isVisible && window.occlusionState.contains(.visible) && !NSApp.isHidden,
+            "active": NSApp.isActive, "screen_locked": locked, "window_id": window.windowNumber,
+            "display_id": window.screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] ?? NSNull(),
+            "focused_tab": string(snapshot["focused_tab_id"]), "focused_pane": string(snapshot["focused_pane_id"]),
+            "width": window.contentView?.bounds.width ?? 0, "height": window.contentView?.bounds.height ?? 0,
+            "scale": window.backingScaleFactor, "refresh_hz": window.screen?.maximumFramesPerSecond ?? 0,
+            "refresh_kind": "maximum_nominal", "animations_enabled": TavernMotionSettings.shared.enabled,
+            "sound_enabled": soundSettings.enabled,
+            "terminal_text": surface.accessibilityValue() as? String ?? "",
+            "terminal_rect": ["x": rect.minX, "y": rect.minY, "width": rect.width, "height": rect.height,
+                              "coordinate_space": "window_points"],
+            "columns": surface.cols, "rows": surface.rows,
+            "offset": integer(scroll["offset_from_bottom"]), "maximum": integer(scroll["max_offset_from_bottom"]),
+            "selected": surface.hasLocalSelection,
+            "tabs": objects(snapshot["tabs"]).map { ["id": string($0["tab_id"]), "label": string($0["label"])] },
+            "state_revision": integer(surface.scene["surface_revision"]),
+            "projection_revision": integer(surface.scene["projection_revision"])
+        ]
+    }
+
+    func benchmarkWaitForDraw(after sequence: UInt64, started: UInt64,
+                              stage: TavernPerformance.Stage = .inputToDraw,
+                              condition: @escaping () -> Bool,
+                              reply: @escaping TavernBenchmarkBridge.Reply) {
+        benchmarkWaitTimer?.invalidate()
+        let deadline = Date(timeIntervalSinceNow: 8)
+        let timer = Timer(timeInterval: 0.005, repeats: true) { [weak self] timer in
+            guard let self, !self.terminated else { timer.invalidate(); reply(.failure(.unavailable)); return }
+            if self.benchmarkDrawSequence > sequence && condition() {
+                timer.invalidate(); self.benchmarkWaitTimer = nil
+                let duration = self.benchmarkDrawTime &- started
+                TavernPerformance.shared.duration(stage, nanoseconds: duration)
+                var result = self.benchmarkInspect()
+                result["latency_ns"] = duration
+                result["boundary"] = "input_to_draw"
+                result["text"] = result["terminal_text"]
+                reply(.success(result))
+            } else if Date() >= deadline {
+                timer.invalidate(); self.benchmarkWaitTimer = nil
+                reply(.failure(.timeout))
+            }
+        }
+        benchmarkWaitTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    func benchmarkCommand(_ command: [String: Any], reply: @escaping TavernBenchmarkBridge.Reply) {
+        let operation = string(command["op"])
+        if operation == "inspect" { reply(.success(benchmarkInspect())); return }
+        if operation == "metrics" { reply(.success(TavernPerformance.shared.snapshot())); return }
+        if operation == "reset_metrics" {
+            TavernPerformance.shared.reset(); updatePerformanceContext(); reply(.success([:])); return
+        }
+        if operation == "export" {
+            guard let url = benchmarkBridge?.exportURL(string(command["path"])) else { reply(.failure(.invalidCommand)); return }
+            TavernPerformance.shared.export(to: url) { result in
+                switch result {
+                case .success: reply(.success(["saved": true]))
+                case .failure: reply(.failure(.exportFailed))
+                }
+            }
+            return
+        }
+        let state = benchmarkInspect()
+        guard state["screen_locked"] as? Bool == false else { reply(.failure(.locked)); return }
+        guard state["ready"] as? Bool == true else { reply(.failure(.unavailable)); return }
+        guard state["visible"] as? Bool == true else { reply(.failure(.notVisible)); return }
+        let started = DispatchTime.now().uptimeNanoseconds
+        let sequence = benchmarkDrawSequence
+        switch operation {
+        case "focus", "focus_pane":
+            let isTab = operation == "focus"
+            let target = string(command[isTab ? "tab" : "pane"])
+            let candidates = objects(snapshot[isTab ? "tabs" : "panes"])
+            guard candidates.contains(where: { string($0[isTab ? "tab_id" : "pane_id"]) == target }) else {
+                reply(.failure(.invalidCommand)); return
+            }
+            if target == string(state[isTab ? "focused_tab" : "focused_pane"]) {
+                var result = state; result["no_change"] = true; result["latency_ns"] = 0
+                result["boundary"] = "input_to_draw"; result["text"] = state["terminal_text"]
+                reply(.success(result)); return
+            }
+            request(isTab ? "tab.focus" : "pane.focus", [(isTab ? "tab_id" : "pane_id"): target])
+            benchmarkWaitForDraw(after: sequence, started: started,
+                condition: { [weak self] in
+                    guard let self else { return false }
+                    return (isTab ? self.benchmarkDrawTab : self.benchmarkDrawPane) == target
+                }, reply: reply)
+        case "scroll":
+            guard let lines = command["lines"] as? Double, lines.isFinite, abs(lines) <= 65535,
+                  let pane = objects(surface.scene["panes"]).first(where: { flag($0["focused"]) }) else {
+                reply(.failure(.invalidCommand)); return
+            }
+            let rect = dictionary(pane["inner_rect"])
+            let point = surface.convert(NSPoint(x: (number(rect["x"]) + max(1, number(rect["width"])) / 2) * surface.cellWidth,
+                                               y: (number(rect["y"]) + max(1, number(rect["height"])) / 2) * surface.cellHeight), to: nil)
+            let serial = benchmarkScrollSerial
+            surface.scrollWheel(with: TavernBenchmarkScrollEvent(point: point, lines: lines,
+                cellHeight: surface.cellHeight, window: window.windowNumber))
+            if serial == benchmarkScrollSerial {
+                var result = benchmarkInspect(); result["no_change"] = true
+                result["latency_ns"] = 0; result["boundary"] = "input_to_draw"; reply(.success(result)); return
+            }
+            if benchmarkScrollTarget == integer(state["offset"]) {
+                var result = benchmarkInspect(); result["no_change"] = true
+                result["latency_ns"] = 0; result["boundary"] = "input_to_draw"; reply(.success(result)); return
+            }
+            benchmarkWaitForDraw(after: sequence, started: started, condition: { [weak self] in
+                guard let self, let confirmed = self.benchmarkScrollAcknowledged else { return false }
+                let current = self.benchmarkInspect()
+                let maximum = integer(current["maximum"]), offset = integer(current["offset"])
+                guard maximum >= confirmed.maximum else { return false }
+                return confirmed.offset == 0 ? offset == 0 :
+                    maximum - offset == confirmed.maximum - confirmed.offset
+            }, reply: reply)
+        case "type":
+            guard let text = command["text"] as? String, text.utf8.count <= 4096 else { reply(.failure(.invalidCommand)); return }
+            surface.insertText(text, replacementRange: NSRange(location: NSNotFound, length: 0))
+            reply(.success(["accepted": true, "boundary": "input_accepted"]))
+        case "select":
+            func point(_ x: String, _ y: String) -> NSPoint? {
+                guard let x = command[x] as? Double, let y = command[y] as? Double,
+                      x.isFinite, y.isFinite, x >= 0, y >= 0, x < Double(surface.cols), y < Double(surface.rows) else { return nil }
+                return surface.convert(NSPoint(x: (x + 0.5) * surface.cellWidth, y: (y + 0.5) * surface.cellHeight), to: nil)
+            }
+            guard let from = point("from_x", "from_y"), let to = point("to_x", "to_y") else { reply(.failure(.invalidCommand)); return }
+            for (type, location) in [(NSEvent.EventType.leftMouseDown, from), (.leftMouseDragged, to), (.leftMouseUp, to)] {
+                guard let event = NSEvent.mouseEvent(with: type, location: location, modifierFlags: [.shift],
+                    timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                    context: nil, eventNumber: 0, clickCount: 1, pressure: 1) else { reply(.failure(.invalidCommand)); return }
+                switch type {
+                case .leftMouseDown: surface.mouseDown(with: event)
+                case .leftMouseDragged: surface.mouseDragged(with: event)
+                default: surface.mouseUp(with: event)
+                }
+            }
+            benchmarkWaitForDraw(after: sequence, started: started, condition: { [weak self] in
+                self?.surface.hasLocalSelection == true
+            }, reply: reply)
+        case "resize":
+            guard let width = command["width"] as? Double, let height = command["height"] as? Double,
+                  width.isFinite, height.isFinite, width >= 600, height >= 450,
+                  width <= 3000, height <= 2000 else { reply(.failure(.invalidCommand)); return }
+            let size = NSSize(width: width, height: height)
+            if window.contentView?.bounds.size == size {
+                var result = state; result["no_change"] = true; result["latency_ns"] = 0; reply(.success(result)); return
+            }
+            window.setContentSize(size)
+            benchmarkWaitForDraw(after: sequence, started: started, condition: { [weak self] in
+                self?.window.contentView?.bounds.size == size
+            }, reply: reply)
+        case "motion":
+            guard let enabled = command["enabled"] as? Bool else { reply(.failure(.invalidCommand)); return }
+            TavernMotionSettings.shared.setAnimationsEnabled(enabled)
+            updatePerformanceContext()
+            reply(.success(["enabled": TavernMotionSettings.shared.enabled, "requested": enabled]))
+        default: reply(.failure(.invalidCommand))
+        }
+    }
+}

@@ -117,6 +117,7 @@ final class TavernCardSurfaceView: NSView, MTKViewDelegate {
     func refreshLighting() { requestFrame() }
     private let renderer: TavernCardRenderer
     private let metalView: MTKView
+    private let presentationMetrics = TavernMetalPresentationMetrics(stage: .cardPresentation, counter: .cardPresented)
     private var seed: UInt64 = 0
     private var construction = TavernPlankConstruction.agent
     private var selected = false
@@ -411,7 +412,10 @@ final class TavernCardSurfaceView: NSView, MTKViewDelegate {
             fastClock = bookmark.isAnimating
             TavernCardClock.shared.setActive(self, run)
         }
-        if !run { previousTime = nil }
+        if !run {
+            previousTime = nil
+            presentationMetrics.suspend()
+        }
         if !shown {
             generation &+= 1
             preparation?.cancel()
@@ -443,19 +447,39 @@ final class TavernCardSurfaceView: NSView, MTKViewDelegate {
 
     func draw(in view: MTKView) {
         guard visible else { updateClock(); return }
-        guard dirty || !reducedMotion, let key = exactKey(),
-              let drawable = view.currentDrawable, let pass = view.currentRenderPassDescriptor,
-              let command = renderer.queue.makeCommandBuffer() else { return }
+        guard dirty || !reducedMotion, let key = exactKey() else { return }
+        let drawableSpan = TavernPerformance.shared.begin(.cardDrawable)
+        let acquiredDrawable = view.currentDrawable
+        let acquiredPass = acquiredDrawable == nil ? nil : view.currentRenderPassDescriptor
+        TavernPerformance.shared.end(drawableSpan)
+        guard let drawable = acquiredDrawable, let pass = acquiredPass,
+              let command = renderer.queue.makeCommandBuffer() else {
+            TavernPerformance.shared.count(.cardUnavailable)
+            return
+        }
         guard drawable.texture.width == key.plank.pixelWidth,
-              drawable.texture.height == key.plank.pixelHeight else { return }
+              drawable.texture.height == key.plank.pixelHeight else {
+            TavernPerformance.shared.count(.cardUnavailable)
+            return
+        }
         let maps = exactMaps(for: key, retain: true)
         advanceClock()
+        let encodeSpan = TavernPerformance.shared.begin(.cardEncode)
         do {
             visibilityShadow = try encode(maps: maps, key: key, uniforms: captureUniforms(),
                                           pass: pass, command: command)
         } catch { fatalError(error.localizedDescription) }
+        TavernPerformance.shared.end(encodeSpan)
+        if TavernPerformance.shared.isEnabled {
+            let presentationMetrics = self.presentationMetrics
+            let token = presentationMetrics.frameToken(continuous: !reducedMotion)
+            drawable.addPresentedHandler { drawable in
+                presentationMetrics.presented(at: drawable.presentedTime, token: token)
+            }
+        }
         command.present(drawable)
         command.addCompletedHandler { command in
+            TavernMetalPresentationMetrics.gpu(command, stage: .cardGPU)
             if command.status == .error {
                 fatalError(L("core.card.renderFailed", String(describing: command.error)))
             }
