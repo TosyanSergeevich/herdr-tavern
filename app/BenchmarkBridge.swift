@@ -121,7 +121,7 @@ struct TavernBenchmarkPresentation {
         let noPaint = allowNoPaint && appliedSequence > checkpoint.applied && !applyNeedsPaint
         let painted = drawnSequence > checkpoint.drawn
         guard (noPaint || painted) && condition() else { return nil }
-        return noPaint ? .noTerminalPaint : .painted(drawnAt)
+        return painted ? .painted(drawnAt) : .noTerminalPaint
     }
 }
 

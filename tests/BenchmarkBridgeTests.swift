@@ -31,9 +31,12 @@ import Darwin
                      "An unchanged frame must not bypass an outstanding paint")
         state.drew(Frame(boot: "boot", projection: 1, surface: 4), at: 50, tab: "tab", pane: "pane")
         precondition(state.completion(after: next, allowNoPaint: true, condition: true) == .painted(50))
+        state.applied(Frame(boot: "boot", projection: 1, surface: 5), needsPaint: false)
+        precondition(state.completion(after: next, allowNoPaint: true, condition: true) == .painted(50),
+                     "A later metadata-only frame must not erase an observed draw")
 
         let synchronous = state.checkpoint
-        let drawnFirst = Frame(boot: "boot", projection: 1, surface: 5)
+        let drawnFirst = Frame(boot: "boot", projection: 1, surface: 6)
         state.drew(drawnFirst, at: 80, tab: "tab", pane: "pane")
         state.applied(drawnFirst, needsPaint: false)
         precondition(state.completion(after: synchronous, allowNoPaint: true, condition: true) == .painted(80),
