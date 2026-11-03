@@ -95,6 +95,14 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     private var connection: RustConnection?
     private var options: LaunchOptions?
     private let directoryAccess = TavernDirectoryAccessController()
+    private struct DirectoryAccessTarget: Equatable {
+        let generation: Int
+        let boot: String
+        let pane: String
+        let path: String
+    }
+    private var lastAutomaticDirectoryAccess: DirectoryAccessTarget?
+    private var directoryAccessSuccess: (target: DirectoryAccessTarget?, message: String)?
     private let terminalLaunchEnvironment = [
         "PI_FORCE_IMAGE_PROTOCOL": "kitty",
         "PATH": LaunchOptions.serverEnvironment["PATH"] ?? LaunchOptions.bundledExecutableURL.deletingLastPathComponent().path
@@ -566,6 +574,7 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         let session = menu(L("shell.session"), parent: main)
         menuAction(L("shell.reconnect"), action: "reconnect", parent: session)
         menuAction(L("shell.workspace.new.menu"), action: "workspace.create", parent: session)
+        menuAction(L("shell.directoryAccess.menu"), action: "directory.access", parent: session)
         if let options {
             let controller = herdrMenuController ?? HerdrMenuController(options: options, showIntegrations: { [weak self] in
                 self?.showAgentSettings(nil)
@@ -669,6 +678,7 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         if action == "sidebar.toggle" { return true }
         if action.isEmpty { return true }
         guard attached, !snapshot.isEmpty, window.attachedSheet == nil, !publicRequestBusy else { return false }
+        if action == "directory.access" { return !directoryAccess.busy && focusedDirectoryAccessTarget() != nil }
         if let target = item.representedObject as? MenuTarget { return menuTargetIsCurrent(target) }
         if action.hasPrefix("pane.") { return !string(snapshot["focused_pane_id"]).isEmpty }
         if action.hasPrefix("tab.") {
@@ -1026,12 +1036,65 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     }
     private func offerDirectoryAccess(_ message: String) {
         guard let directory = TavernDirectoryAccess.deniedDirectory(in: message) else { return }
-        localizedError { L("shell.directoryAccess.title") }
-        let epoch = generation, boot = string(snapshot["boot_id"])
-        directoryAccess.present(directory: directory, for: window, isCurrent: { [weak self] in
-            guard let self else { return false }
-            return !self.terminated && self.generation == epoch && string(self.snapshot["boot_id"]) == boot
-        }, report: { [weak self] message in self?.localizedError { message } })
+        let target = focusedDirectoryAccessTarget()
+        beginDirectoryAccess(directory: directory, target: target, explicit: true)
+    }
+    private func focusedDirectoryAccessTarget() -> DirectoryAccessTarget? {
+        let boot = string(snapshot["boot_id"]), pane = string(snapshot["focused_pane_id"])
+        guard attached, !boot.isEmpty, !pane.isEmpty,
+              let row = objects(snapshot["panes"]).first(where: { string($0["pane_id"]) == pane }),
+              let path = [string(row["foreground_cwd"]), string(row["cwd"])].first(where: { !$0.isEmpty }),
+              path.hasPrefix("/"), !path.utf8.contains(0) else { return nil }
+        return DirectoryAccessTarget(generation: generation, boot: boot, pane: pane, path: path)
+    }
+    private func synchronizeDirectoryAccess() {
+        if let success = directoryAccessSuccess, success.target != focusedDirectoryAccessTarget() {
+            if lastError == success.message { clearError() }
+            directoryAccessSuccess = nil
+        }
+        guard let target = focusedDirectoryAccessTarget(), target != lastAutomaticDirectoryAccess else { return }
+        if beginDirectoryAccess(directory: URL(fileURLWithPath: target.path, isDirectory: true),
+                                target: target, explicit: false) {
+            lastAutomaticDirectoryAccess = target
+        }
+    }
+    @discardableResult
+    private func beginDirectoryAccess(directory: URL, target: DirectoryAccessTarget?, explicit: Bool) -> Bool {
+        let epoch = generation, boot = string(snapshot["boot_id"]), wasAttached = attached
+        let isCurrent: () -> Bool = { [weak self] in
+            guard let self, !self.terminated, self.generation == epoch,
+                  self.attached == wasAttached, string(self.snapshot["boot_id"]) == boot else { return false }
+            if let target { return self.focusedDirectoryAccessTarget() == target }
+            return true
+        }
+        let verify: TavernDirectoryAccessController.Verify?
+        if let options, attached {
+            let path = directory.path
+            verify = {
+                let id = UUID().uuidString
+                do {
+                    let response = try RustConnection.publicRequest(path: options.publicSocketPath,
+                        request: ["id": id, "method": "server.directory_access", "params": ["path": path]])
+                    return TavernDirectoryAccess.serverCheck(response: response, id: id, path: path)
+                } catch { return .failed(error.localizedDescription) }
+            }
+        } else { verify = nil }
+        return directoryAccess.request(directory: directory, for: window, explicit: explicit,
+            isCurrent: isCurrent, verify: verify, report: { [weak self] message in
+                guard let self, isCurrent() else { return }
+                self.localizedError { message }
+                if message == L("shell.directoryAccess.verified") {
+                    self.directoryAccessSuccess = (target, message)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
+                        guard let self, isCurrent(), self.lastError == message else { return }
+                        self.clearError()
+                        self.directoryAccessSuccess = nil
+                    }
+                }
+            }, finished: { [weak self] in
+                // A focus/cwd change during IO gets its own check, not a stale dialog.
+                self?.synchronizeDirectoryAccess()
+            })
     }
     private func disconnect(_ message: String) { disconnect { message } }
     private func disconnect(_ message: @escaping () -> String) {
@@ -1303,6 +1366,7 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             rebuildNavigation()
         }
         else { updateStatus() }
+        synchronizeDirectoryAccess()
     }
     private func viewedPaneID() -> String? {
         guard attached, surfaceActive, NSApp.isActive, window.isKeyWindow, window.isVisible,
@@ -1419,6 +1483,10 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             localizedError { L("shell.error.paneCommand") }; return
         }
         switch action {
+        case "directory.access":
+            guard let target = focusedDirectoryAccessTarget() else { return }
+            beginDirectoryAccess(directory: URL(fileURLWithPath: target.path, isDirectory: true),
+                                 target: target, explicit: true)
         case "workspace.focus": request(action, ["workspace_id":target])
         case "workspace.create": createWorkspace()
         case "tab.focus": request(action, ["tab_id":target])

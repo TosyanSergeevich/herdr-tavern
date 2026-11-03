@@ -9,9 +9,12 @@
 <key>CFBundleExecutable</key><string>HerdrTavern</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleIconFile</key><string>AppIcon</string>
-<key>CFBundleShortVersionString</key><string>1.1.0</string>
-<key>CFBundleVersion</key><string>4</string>
+<key>CFBundleShortVersionString</key><string>1.1.1</string>
+<key>CFBundleVersion</key><string>5</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>NSHighResolutionCapable</key><true/>
+<key>NSDocumentsFolderUsageDescription</key><string>Allow terminal commands and agents you run in Tavern to access your Documents folder.</string>
+<key>NSDesktopFolderUsageDescription</key><string>Allow terminal commands and agents you run in Tavern to access your Desktop folder.</string>
+<key>NSDownloadsFolderUsageDescription</key><string>Allow terminal commands and agents you run in Tavern to access your Downloads folder.</string>
 <key>NSPrincipalClass</key><string>NSApplication</string>
 </dict></plist>

@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 mod agent_view;
 mod agents;
+mod directory_access;
 mod env;
 mod integrations;
 mod layouts;
@@ -902,6 +903,9 @@ impl App {
         };
 
         let response = match request.method {
+            Method::ServerDirectoryAccess(params) => {
+                return directory_access::handle_request(request.id, params);
+            }
             Method::ServerStop(_) => {
                 self.state.should_quit = true;
                 SuccessResponse {

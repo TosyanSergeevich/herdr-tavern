@@ -48,6 +48,9 @@ pub enum ResponseResult {
         #[serde(default)]
         capabilities: Option<ServerCapabilities>,
     },
+    DirectoryAccess {
+        path: String,
+    },
     SessionSnapshot {
         snapshot: Box<SessionSnapshot>,
     },

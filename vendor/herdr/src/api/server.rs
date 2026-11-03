@@ -606,6 +606,7 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
     match method {
         Method::Ping(_) => "ping",
         Method::ServerStop(_) => "server.stop",
+        Method::ServerDirectoryAccess(_) => "server.directory_access",
         Method::ServerLiveHandoff(_) => "server.live_handoff",
         Method::ServerReloadConfig(_) => "server.reload_config",
         Method::ServerSshAgentRegister(_) => "server.ssh_agent.register",

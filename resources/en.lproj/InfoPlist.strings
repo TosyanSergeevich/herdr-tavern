@@ -1,0 +1,3 @@
+"NSDocumentsFolderUsageDescription" = "Allow terminal commands and agents you run in Tavern to access your Documents folder.";
+"NSDesktopFolderUsageDescription" = "Allow terminal commands and agents you run in Tavern to access your Desktop folder.";
+"NSDownloadsFolderUsageDescription" = "Allow terminal commands and agents you run in Tavern to access your Downloads folder.";
