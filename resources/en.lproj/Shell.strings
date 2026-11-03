@@ -193,3 +193,13 @@
 "shell.performance.export.error" = "Could not save diagnostics";
 "shell.performance.benchmark.error" = "Unsafe benchmark environment. A private directory with mode 0700 and an explicit client socket are required.";
 "shell.performance.mark" = "Mark a Slowdown Now";
+"shell.directoryAccess.title" = "Folder access required";
+"shell.directoryAccess.message" = "macOS denied access to “%@”. The shell was not started in this folder. Select the folder to explicitly grant access, or review Files and Folders permissions in System Settings.";
+"shell.directoryAccess.choose" = "Grant Folder Access…";
+"shell.directoryAccess.settings" = "System Settings…";
+"shell.directoryAccess.select" = "Select “%@” to grant Tavern access. No command will be repeated automatically.";
+"shell.directoryAccess.allow" = "Grant Access";
+"shell.directoryAccess.settingsHelp" = "Allow Tavern access in Privacy & Security → Files and Folders, then retry. If macOS requires restarting the app, existing shells will stay running.";
+"shell.directoryAccess.wrongFolder" = "The selected folder differs from the denied folder. Access was not changed; repeat the action and select the requested folder.";
+"shell.directoryAccess.retry" = "Tavern can read the folder. Retry the action explicitly. If the running server still reports denied access, restart Tavern after updating Files and Folders permissions; existing shells will stay running.";
+"shell.directoryAccess.stillDenied" = "The folder is still inaccessible. Check Files and Folders permissions and the folder’s ownership/access rights. Tavern cannot override a macOS denial.";

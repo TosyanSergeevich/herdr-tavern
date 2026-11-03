@@ -442,7 +442,12 @@ fn absolute_process_cwd(pid: u32) -> Option<std::path::PathBuf> {
 
 #[cfg(unix)]
 fn usable_process_cwd(pid: u32) -> Option<std::path::PathBuf> {
-    absolute_process_cwd(pid).filter(|cwd| cwd.is_dir())
+    absolute_process_cwd(pid).filter(|cwd| match std::fs::metadata(cwd) {
+        Ok(metadata) => metadata.is_dir(),
+        // Retain the intended cwd so launch preflight can request access instead
+        // of silently following a stale shell-reported directory.
+        Err(err) => matches!(err.raw_os_error(), Some(libc::EPERM | libc::EACCES)),
+    })
 }
 
 #[cfg(unix)]

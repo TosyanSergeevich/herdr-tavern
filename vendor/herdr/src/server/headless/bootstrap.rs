@@ -66,7 +66,7 @@ pub fn run_server() -> io::Result<()> {
             api_rx,
             event_hub,
         )?;
-        seed_startup_workspace_if_empty(&mut app);
+        seed_startup_workspace_if_empty(&mut app)?;
 
         // Create the headless server.
         let mut server = match HeadlessServer::new(
@@ -97,13 +97,20 @@ pub fn run_server() -> io::Result<()> {
     });
 
     rt.shutdown_timeout(Duration::from_millis(100));
+    if let Err(err) = &result {
+        // Keep the authorization marker as a raw JSON-path suffix in the
+        // launcher's captured stderr, rather than an escaped tracing field.
+        if err.kind() == io::ErrorKind::PermissionDenied {
+            eprintln!("{err}");
+        }
+    }
     crate::logging::shutdown("server");
     result
 }
 
-fn seed_startup_workspace_if_empty(app: &mut app::App) {
+fn seed_startup_workspace_if_empty(app: &mut app::App) -> io::Result<()> {
     let Some(cwd) = take_startup_cwd() else {
-        return;
+        return Ok(());
     };
 
     if !app.state.workspaces.is_empty() {
@@ -111,18 +118,28 @@ fn seed_startup_workspace_if_empty(app: &mut app::App) {
             cwd = %cwd.display(),
             "restored session already has workspaces; ignoring startup cwd"
         );
-        return;
+        return Ok(());
     }
 
+    #[cfg(unix)]
+    if let Err(err) = crate::pty::backend::validate_launch_directory(&cwd) {
+        if err.kind() == io::ErrorKind::PermissionDenied {
+            return Err(err);
+        }
+    }
     match app.create_workspace_with_options(cwd.clone(), true) {
         Ok(_) => {
             info!(cwd = %cwd.display(), "created startup workspace");
         }
         Err(err) => {
+            if err.kind() == io::ErrorKind::PermissionDenied {
+                return Err(err);
+            }
             warn!(cwd = %cwd.display(), err = %err, "failed to create startup workspace");
             app.state.mode = app::Mode::Navigate;
         }
     }
+    Ok(())
 }
 
 fn take_startup_cwd() -> Option<PathBuf> {

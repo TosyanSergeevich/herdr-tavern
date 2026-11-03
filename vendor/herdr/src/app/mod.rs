@@ -407,6 +407,19 @@ impl App {
             policy.restore_session && snapshot.is_none(),
         )));
         let (workspaces, active, selected) = if let Some(snap) = snapshot {
+            #[cfg(unix)]
+            for pane in snap
+                .workspaces
+                .iter()
+                .flat_map(|ws| &ws.tabs)
+                .flat_map(|tab| tab.panes.values())
+            {
+                if let Err(err) = crate::pty::backend::validate_launch_directory(&pane.cwd) {
+                    if err.kind() == std::io::ErrorKind::PermissionDenied {
+                        return Err(err);
+                    }
+                }
+            }
             let history = config
                 .experimental
                 .pane_history

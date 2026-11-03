@@ -450,7 +450,8 @@ struct LaunchOptions {
         try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
         let logURL = logs.appendingPathComponent("server.log")
         if !FileManager.default.fileExists(atPath: logURL.path) { FileManager.default.createFile(atPath: logURL.path, contents: nil) }
-        let handle = try FileHandle(forWritingTo: logURL); try handle.seekToEnd()
+        let handle = try FileHandle(forWritingTo: logURL)
+        let startupOffset = try handle.seekToEnd()
         defer { try? handle.close() }
         process.standardOutput = handle; process.standardError = handle
         try process.run()
@@ -462,6 +463,18 @@ struct LaunchOptions {
             guard process.isRunning, DispatchTime.now() < deadline else { break }
             Thread.sleep(forTimeInterval: 0.05)
         } while true
+        // Inspect only this launch's bounded log tail, never a previous server failure.
+        if let reader = try? FileHandle(forReadingFrom: logURL) {
+            defer { try? reader.close() }
+            let end = (try? reader.seekToEnd()) ?? startupOffset
+            try? reader.seek(toOffset: max(startupOffset, end > 65536 ? end - 65536 : 0))
+            if let data = try? reader.readToEnd(), let text = String(data: data, encoding: .utf8),
+               let line = text.components(separatedBy: .newlines).last(where: {
+                   TavernDirectoryAccess.deniedDirectory(in: $0) != nil
+               }) {
+                throw NativeError.message(line)
+            }
+        }
         throw NativeError.message(L("core.launch.socketTimeout", logURL.path))
     }
 }

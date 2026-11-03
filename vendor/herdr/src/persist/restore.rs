@@ -521,6 +521,18 @@ fn restore_tab(
 
         let cwd = saved_cwd;
         let has_import = old_id.is_some_and(|old_id| imported_panes.contains_key(old_id));
+        #[cfg(unix)]
+        if !has_import {
+            if let Err(err) = crate::pty::backend::validate_launch_directory(&cwd) {
+                if err.kind() == std::io::ErrorKind::PermissionDenied {
+                    error!("{err}");
+                    let terminal = unavailable_restored_terminal(saved_pane, cwd, err.to_string());
+                    panes.insert(*id, PaneState::new(terminal.id.clone()));
+                    terminals.push(terminal);
+                    continue;
+                }
+            }
+        }
         if !has_import && !cwd.is_dir() {
             let terminal = unavailable_restored_terminal(
                 saved_pane,

@@ -94,6 +94,7 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     private var pendingSnapshot: (snapshot: [String: Any], presentation: TavernNavigationPresentation)?
     private var connection: RustConnection?
     private var options: LaunchOptions?
+    private let directoryAccess = TavernDirectoryAccessController()
     private let terminalLaunchEnvironment = [
         "PI_FORCE_IMAGE_PROTOCOL": "kitty",
         "PATH": LaunchOptions.serverEnvironment["PATH"] ?? LaunchOptions.bundledExecutableURL.deletingLastPathComponent().path
@@ -1018,9 +1019,19 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
                 DispatchQueue.main.async {
                     guard let self, self.generation == epoch, !self.terminated else { return }
                     self.connecting = false; self.disconnect { error.localizedDescription }
+                    self.offerDirectoryAccess(error.localizedDescription)
                 }
             }
         }
+    }
+    private func offerDirectoryAccess(_ message: String) {
+        guard let directory = TavernDirectoryAccess.deniedDirectory(in: message) else { return }
+        localizedError { L("shell.directoryAccess.title") }
+        let epoch = generation, boot = string(snapshot["boot_id"])
+        directoryAccess.present(directory: directory, for: window, isCurrent: { [weak self] in
+            guard let self else { return false }
+            return !self.terminated && self.generation == epoch && string(self.snapshot["boot_id"]) == boot
+        }, report: { [weak self] message in self?.localizedError { message } })
     }
     private func disconnect(_ message: String) { disconnect { message } }
     private func disconnect(_ message: @escaping () -> String) {
@@ -1235,6 +1246,7 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
                 requests.removeAll()
                 endpointQueuedAt.removeAll(); pendingTabTimings.removeAll()
                 scrollIntent.reset()
+                offerDirectoryAccess(string(rejection["message"]))
             } else {
                 if action.method == "pane.scroll" {
                     let pane = dictionary(dictionary(response["result"])["pane"])
@@ -1255,6 +1267,7 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         case UInt32(TAVERN_ERROR):
             let message = string(event.metadata["message"])
             localizedError { message.isEmpty ? L("shell.error.herdr") : message }
+            offerDirectoryAccess(message)
         case UInt32(TAVERN_CLOSED):
             let message = string(event.metadata["message"])
             let previousError = lastErrorLocalization, previousMessage = lastError
