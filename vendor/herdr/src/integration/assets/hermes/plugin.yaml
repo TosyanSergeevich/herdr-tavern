@@ -1,0 +1,4 @@
+# Modified for Tavern: isolated herdr-tavern runtime namespace.
+name: herdr-tavern-agent-state
+version: "1.0"
+description: Report Hermes Agent lifecycle state to Herdr panes

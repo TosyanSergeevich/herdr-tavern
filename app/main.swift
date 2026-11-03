@@ -94,7 +94,10 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     private var pendingSnapshot: (snapshot: [String: Any], presentation: TavernNavigationPresentation)?
     private var connection: RustConnection?
     private var options: LaunchOptions?
-    private let terminalLaunchEnvironment = ["PI_FORCE_IMAGE_PROTOCOL": "kitty"]
+    private let terminalLaunchEnvironment = [
+        "PI_FORCE_IMAGE_PROTOCOL": "kitty",
+        "PATH": LaunchOptions.serverEnvironment["PATH"] ?? LaunchOptions.bundledExecutableURL.deletingLastPathComponent().path
+    ]
     private var generation = 0
     private var connecting = false
     private var attached = false
@@ -128,7 +131,6 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     private lazy var soundPlayer = TavernSoundPlayer(settings: soundSettings)
     private var settingsController: TavernSettingsWindowController?
     private var herdrMenuController: HerdrMenuController?
-    private var herdrSetup: HerdrSetupController?
     private lazy var agentIntegrations: AgentIntegrationService = {
         let launchOptions = options
         return AgentIntegrationService(executable: {
@@ -215,18 +217,6 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
         guard !terminated else { return }
         options = launchOptions
         do { _ = try executableResult.get() }
-        catch NativeError.herdrNotFound {
-            let setup = HerdrSetupController()
-            herdrSetup = setup
-            NSApp.activate(ignoringOtherApps: true)
-            setup.present { [weak self] installed in
-                guard let self, !self.terminated else { return }
-                self.herdrSetup = nil
-                if installed { self.startInterface(fonts: fonts) }
-                else { NSApp.terminate(nil) }
-            }
-            return
-        }
         catch { showStartupError(error.localizedDescription); return }
         startInterface(fonts: fonts)
     }
@@ -586,7 +576,7 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
             })
             herdrMenuController = controller
             controller.localize()
-            let item = NSMenuItem(title: "herdr", action: nil, keyEquivalent: "")
+            let item = NSMenuItem(title: "herdr-tavern", action: nil, keyEquivalent: "")
             item.submenu = controller.menu
             main.addItem(item)
         }
@@ -1693,11 +1683,9 @@ final class TavernDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, N
     func windowDidDeminiaturize(_ notification: Notification) { if attached { resumeSurface() } }
     func windowWillClose(_ notification: Notification) { detach(); NSApp.terminate(nil) }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        // Между окнами установки основного окна приложения ещё нет.
-        herdrSetup == nil
+        true
     }
     func applicationWillTerminate(_ notification: Notification) {
-        herdrSetup?.cancel()
         detach()
     }
     private func detach() {

@@ -24,19 +24,13 @@ private final class HerdrConfigService {
     static let maximumBytes = 1024 * 1024
     private let options: LaunchOptions
     private let worker = DispatchQueue(label: "org.local.HerdrTavern.herdrConfig", qos: .userInitiated)
-    private let environment = ProcessInfo.processInfo.environment
+    private let environment = LaunchOptions.serverEnvironment
     private let workingDirectory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
 
     init(options: LaunchOptions) { self.options = options }
 
     private func configURL() -> URL {
-        if let path = environment["HERDR_CONFIG_PATH"] {
-            return URL(fileURLWithPath: path, relativeTo: workingDirectory).standardizedFileURL
-        }
-        let home = environment["HOME"] ?? FileManager.default.homeDirectoryForCurrentUser.path
-        let base = environment["XDG_CONFIG_HOME"] ?? home + "/.config"
-        return URL(fileURLWithPath: base, relativeTo: workingDirectory)
-            .appendingPathComponent("herdr/config.toml").standardizedFileURL
+        LaunchOptions.configURL(environment: environment)
     }
 
     private func readBytes(_ url: URL) throws -> Data? {
@@ -96,7 +90,7 @@ private final class HerdrConfigService {
     private func run(_ arguments: [String], config: URL? = nil, completion: @escaping (Result<String, Error>) -> Void) {
         do {
             var selectedEnvironment = environment
-            if let config { selectedEnvironment["HERDR_CONFIG_PATH"] = config.path }
+            if let config { selectedEnvironment["HERDR_TAVERN_CONFIG_PATH"] = config.path }
             let command = HerdrConfigProcess(executable: try options.resolveExecutable(), arguments: arguments,
                                              environment: selectedEnvironment, directory: workingDirectory,
                                              worker: worker, completion: completion)
@@ -317,7 +311,7 @@ private final class HerdrConfigProcess {
 }
 
 final class HerdrMenuController: NSObject, NSMenuDelegate {
-    let menu = NSMenu(title: "herdr")
+    let menu = NSMenu(title: "herdr-tavern")
     private let service: HerdrConfigService
     private let showIntegrations: () -> Void
     private let reload: (@escaping (Result<String, Error>) -> Void) -> Void

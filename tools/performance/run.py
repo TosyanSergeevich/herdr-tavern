@@ -292,7 +292,7 @@ class Sandbox:
         self.env = clean_environment(self.root / "config")
         self.bridge_dir = self.root / "bridge"
         self.bridge_dir.mkdir(mode=0o700)
-        config = self.root / "config" / "herdr"
+        config = self.root / "config" / "herdr-tavern"
         config.mkdir(parents=True, mode=0o700)
         (config / "config.toml").write_text('onboarding = false\n[terminal]\ndefault_shell = "/bin/sh"\nshell_mode = "non_login"\n[update]\nversion_check = false\nmanifest_check = false\n[ui]\ncopy_on_select = false\n[ui.sound]\nenabled = false\n[ui.toast]\ndelivery = "off"\n[session]\nresume_agents_on_restore = false\n[experimental]\npane_history = false\n')
         try:
@@ -316,7 +316,7 @@ class Sandbox:
         self.log = (self.root / "process.log").open("wb")
         self.server_process = subprocess.Popen([self.args.herdr, "--session", self.session, "server"],
                                                env=self.env, stdout=self.log, stderr=self.log, start_new_session=True)
-        socket_path = self.root / "config" / "herdr" / "sessions" / self.session / "herdr-client.sock"
+        socket_path = self.root / "config" / "herdr-tavern" / "sessions" / self.session / "herdr-tavern-client.sock"
         def socket_ready():
             if self.server_process.poll() is not None:
                 raise BenchmarkError("server_exited")
@@ -726,7 +726,7 @@ def markdown(report):
 def parser():
     result = argparse.ArgumentParser(description="Изолированные performance-сцены Tavern (macOS, Python stdlib). Нужен видимый unlocked экран; никаких моделей/сети.")
     result.add_argument("--app", type=Path, required=True, help="Путь к собранной .app; оригинал не изменяется")
-    result.add_argument("--herdr", default=shutil.which("herdr"), help="Установленный herdr; не скачивается")
+    result.add_argument("--herdr-tavern", dest="herdr", help="Явный runtime; по умолчанию Contents/Helpers/herdr-tavern указанного приложения")
     result.add_argument("--profile", choices=("normal", "loaded"), default="normal", help="normal: 5 tabs/1 output; loaded: 20 tabs/multiple output")
     result.add_argument("--output", type=Path, required=True, help="Новый каталог отчёта JSON/Markdown; существующий не перезаписывается")
     result.add_argument("--scenario", choices=SCENARIOS, action="append", help="Повторяемый выбор сцен; по умолчанию все восемь")
@@ -746,10 +746,11 @@ def main():
         cli_parser.error("repetitions >= 1, duration > 0 и finite")
     if sys.platform != "darwin":
         cli_parser.error("Требуется macOS")
-    if not args.herdr or not Path(args.herdr).is_file():
-        cli_parser.error("herdr не найден; установка/скачивание не выполняется")
-    args.herdr = str(Path(args.herdr).resolve())
     args.app = args.app.resolve()
+    runtime = Path(args.herdr) if args.herdr else args.app / "Contents" / "Helpers" / "herdr-tavern"
+    if not runtime.is_file():
+        cli_parser.error("herdr-tavern не найден; установка/скачивание не выполняется")
+    args.herdr = str(runtime.resolve())
     if not (args.app / "Contents" / "Info.plist").is_file():
         cli_parser.error("app не является собранным bundle")
     args.output = args.output.resolve()

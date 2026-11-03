@@ -10,6 +10,15 @@ if ! security find-identity -v -p codesigning | /usr/bin/grep -Fq "\"$SIGNING_ID
     exit 1
 fi
 plutil -lint resources/en.lproj/*.strings resources/ru.lproj/*.strings
+command -v python3 >/dev/null
+ZIG="${ZIG:-zig}"
+if [[ "$("$ZIG" version)" != "0.16.0" ]]; then
+    printf 'Zig 0.16.0 is required to build the bundled herdr-tavern runtime (set ZIG to its executable).\n' >&2
+    exit 1
+fi
+export ZIG
+export ZIG_GLOBAL_CACHE_DIR="$ROOT/target/zig-cache"
+export ZIG_LOCAL_CACHE_DIR="$ROOT/target/zig-local-cache"
 
 # Cargo разбивает RUSTFLAGS по пробельным символам; encoded-форма сохраняет пробелы в путях.
 if [[ -z "${CARGO_ENCODED_RUSTFLAGS+x}" ]]; then
@@ -32,16 +41,22 @@ export CARGO_ENCODED_RUSTFLAGS
 # a mixed build if sources change while Rust/Swift or resources are being read.
 source_digest() {
     local digest
-    digest="$(find app include crates resources/Shaders -type f \( -name '*.swift' -o -name '*.rs' -o -name '*.h' -o -name '*.metal' -o -name 'Cargo.toml' \) -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256 | shasum -a 256)"
+    digest="$(find app include crates resources/Shaders vendor/herdr licenses/runtime tools/package-runtime-licenses.py build.sh Cargo.toml Cargo.lock -type d \( -name target -o -name .zig-cache -o -name zig-out -o -name zig-pkg -o -name __pycache__ \) -prune -o -type f ! -name '*.pyc' ! -name '.DS_Store' -print0 | LC_ALL=C sort -z | xargs -0 shasum -a 256 | shasum -a 256)"
     printf '%s' "${digest%% *}"
 }
 source_revision="$(source_digest)"
 cargo +stable build --locked --release -p tavern-client
+CARGO_TARGET_DIR="$ROOT/target/herdr-tavern" \
+    cargo +1.96.1 build --manifest-path vendor/herdr/Cargo.toml --locked --release --bin herdr-tavern
 mkdir -p "$ROOT/build"
 STAGING="$(mktemp -d "$ROOT/build/.tavern-build.XXXXXX")"
 trap 'rm -rf "$STAGING"' EXIT
 APP="$STAGING/Herdr Tavern.app"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/Licenses" "$APP/Contents/Resources/Sounds" "$APP/Contents/Resources/Fonts" "$APP/Contents/Resources/Textures"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Helpers" "$APP/Contents/Resources/Licenses" "$APP/Contents/Resources/Sounds" "$APP/Contents/Resources/Fonts" "$APP/Contents/Resources/Textures"
+cp "$ROOT/target/herdr-tavern/release/herdr-tavern" "$APP/Contents/Helpers/herdr-tavern"
+# Apple strip removes the Zig/C object debug map from the shipped executable.
+# Keep Cargo's LLVM stripping disabled: it corrupts proc-macro dylibs on macOS 27.
+xcrun strip -S "$APP/Contents/Helpers/herdr-tavern"
 xcrun swiftc -O -target "$(uname -m)-apple-macosx14.0" \
     -file-prefix-map "$HOME=home" -file-prefix-map "$ROOT=tavern" \
     -Xlinker -oso_prefix -Xlinker "$ROOT/" \
@@ -53,6 +68,12 @@ cp app/Info.plist "$APP/Contents/Info.plist"
 cp LICENSE LICENSE.ru NOTICE NOTICE.ru "$APP/Contents/Resources/Licenses/"
 cp crates/herdr-protocol/LICENSE "$APP/Contents/Resources/Licenses/herdr-protocol.txt"
 cp licenses/*.txt "$APP/Contents/Resources/Licenses/"
+cp vendor/herdr/PROVENANCE.json "$APP/Contents/Resources/Licenses/herdr-tavern-provenance.json"
+CARGO_TARGET_DIR="$ROOT/target/herdr-tavern" \
+    cargo +1.96.1 metadata --manifest-path vendor/herdr/Cargo.toml --locked --format-version 1 \
+    --filter-platform "$(rustc +1.96.1 -vV | /usr/bin/awk '/^host:/ {print $2}')" > "$STAGING/runtime-metadata.json"
+python3 tools/package-runtime-licenses.py "$STAGING/runtime-metadata.json" \
+    vendor/herdr "$ZIG_GLOBAL_CACHE_DIR" "$APP/Contents/Resources/Licenses/herdr-tavern"
 cp -R resources/en.lproj resources/ru.lproj "$APP/Contents/Resources/"
 cp resources/Sounds/*.wav "$APP/Contents/Resources/Sounds/"
 cp resources/Fonts/*.ttf resources/Fonts/*.otf "$APP/Contents/Resources/Fonts/"
@@ -94,6 +115,7 @@ if [[ "$(source_digest)" != "$source_revision" ]]; then
     exit 1
 fi
 plutil -insert TavernBuildSourceDigest -string "$source_revision" "$APP/Contents/Info.plist"
+codesign --force --sign "$SIGNING_IDENTITY" --identifier org.local.HerdrTavern.runtime "$APP/Contents/Helpers/herdr-tavern"
 codesign --force --sign "$SIGNING_IDENTITY" --identifier org.local.HerdrTavern "$APP"
 codesign --verify --deep --strict "$APP"
 # Не трогаем прежнее приложение, пока новая сборка не подписана и не проверена.

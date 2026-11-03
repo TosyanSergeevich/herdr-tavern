@@ -178,7 +178,7 @@ final class AgentIntegrationService {
     }
 
     private func environment(target: String? = nil) throws -> [String: String] {
-        var environment = ProcessInfo.processInfo.environment
+        var environment = LaunchOptions.serverEnvironment
         let home = environment["HOME"] ?? FileManager.default.homeDirectoryForCurrentUser.path
         guard home.hasPrefix("/") else { throw AgentIntegrationError.message("settings.integration.absoluteHome") }
         environment["HOME"] = home

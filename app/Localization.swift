@@ -44,7 +44,7 @@ private enum TavernLocalizationError: LocalizedError {
 /// Loads immutable catalogs once; changing language does not recreate app state.
 final class TavernLocalization {
     static let preferenceKey = "tavern.language"
-    private static let tableNames = ["Shell", "Settings", "Core", "Installer"]
+    private static let tableNames = ["Shell", "Settings", "Core"]
 
     static let shared: TavernLocalization = {
         do {

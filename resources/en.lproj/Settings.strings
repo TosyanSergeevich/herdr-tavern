@@ -95,7 +95,7 @@
 "settings.integration.path" = "Integration path: %@";
 "settings.integration.unknownTarget" = "New herdr target: view only. Tavern does not yet know its configuration rules.";
 "settings.integration.experimental" = "Experimental herdr integration (CLI-only).";
-"settings.integration.unknownRules" = "Tavern does not know the integration rules for %@; use the standard herdr CLI.";
+"settings.integration.unknownRules" = "Tavern does not know the integration rules for %@; use the bundled herdr-tavern CLI.";
 "settings.integration.agentUnavailable" = "The specified agent executable is unavailable: %@";
 "settings.integration.unsupported" = "The selected herdr does not support the %@ integration.";
 "settings.integration.emptyResult" = "herdr exited without describing the result. Check the status before trying another operation.";

@@ -7,12 +7,12 @@
 "core.connection.emptyEvent" = "Пустое событие клиента.";
 "core.connection.closed" = "Соединение закрыто.";
 "core.connection.invalidAPIResponse" = "Некорректный ответ публичного API.";
-"core.launch.arguments" = "Аргументы: --socket PATH (только подключение), --herdr PATH, --session NAME";
+"core.launch.arguments" = "Аргументы: --socket PATH (только подключение), --herdr-tavern PATH, --session NAME";
 "core.launch.emptyValue" = "Пустое значение %@";
-"core.launch.invalidSession" = "Недопустимое имя сессии herdr.";
-"core.launch.notExecutable" = "herdr не исполняемый: %@";
-"core.launch.herdrNotFound" = "herdr не найден. Установите herdr или укажите --herdr PATH.";
-"core.launch.socketTimeout" = "herdr не создал socket за 15 секунд. Журнал: %@";
+"core.launch.invalidSession" = "Недопустимое имя сессии herdr-tavern.";
+"core.launch.notExecutable" = "herdr-tavern не исполняемый: %@";
+"core.launch.herdrNotFound" = "Встроенный runtime herdr-tavern отсутствует или не исполняемый (Contents/Helpers/herdr-tavern). Переустановите или пересоберите приложение целиком.";
+"core.launch.socketTimeout" = "herdr-tavern не создал socket за 15 секунд. Журнал: %@";
 "core.surface.fontUnavailable" = "Не удалось загрузить встроенный шрифт %@. Пересоберите приложение с ресурсами шрифтов.";
 "core.surface.terminal" = "Терминал herdr";
 "core.surface.invalidAssetSize" = "Некорректные размеры графического ресурса.";

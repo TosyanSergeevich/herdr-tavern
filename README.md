@@ -29,7 +29,7 @@ Link hover resolves files in the background with a short-lived cache. Clicking a
 
 ## Build and run
 
-To build locally, you need **macOS 14+**, **Xcode Command Line Tools**, and **Rust stable with Cargo**. First [set up the local signing certificate](docs/SETUP.md#local-signing); keep it for future builds.
+To build locally, you need **macOS 14+**, **Xcode Command Line Tools**, **Rust stable and 1.96.1 through rustup**, **Zig 0.16.0** (or its path in `ZIG`), and **Python 3** for packaging license notices. First [set up the local signing certificate](docs/SETUP.md#local-signing); keep it for future builds.
 
 From the repository root:
 
@@ -38,7 +38,7 @@ From the repository root:
 open "build/Herdr Tavern.app"
 ```
 
-If herdr is missing, Tavern offers to install the official pinned **0.9.4** release after your confirmation. You can also [install herdr yourself](https://github.com/herdrdev/herdr#readme). It is not bundled with Tavern, and an existing installation is not overwritten or updated.
+Tavern bundles its own **herdr-tavern** runtime, built from the pinned source in `vendor/herdr/`. It uses separate configuration, state and sockets and is updated with Tavern. An existing upstream herdr installation and its sessions are not used, migrated or overwritten.
 
 Open **Settings** with `⌘,` to choose a language, connect agent integrations, and adjust sounds. Start your installed agent in a terminal pane; changing an integration requires restarting that agent.
 
@@ -46,7 +46,7 @@ Open **Settings** with `⌘,` to choose a language, connect agent integrations, 
 
 ## Limitations
 
-- Builds target your machine's architecture, not a universal binary. Compatibility with arbitrary newer herdr versions is not guaranteed.
+- Builds target your machine's architecture, not a universal binary. The bundled runtime and client are shipped together; arbitrary external runtime versions are not supported.
 - Tavern is a graphical client, not a replacement for every herdr TUI feature or built-in shortcut.
 - Text and image paste and Finder drops work with the terminal program inside the pane. A Finder drop inserts paths; it does not upload files or send Enter.
 

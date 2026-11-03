@@ -312,45 +312,65 @@ struct LaunchOptions {
     let connectOnly: Bool
     let herdrPath: String?
     let session: String?
-    // Finder не передаёт PATH из настроек оболочки. Поиск herdr и его
-    // дочерние процессы должны видеть одинаковые каталоги инструментов.
-    static let serverEnvironment: [String: String] = {
-        var environment = ProcessInfo.processInfo.environment
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
+    #if DEBUG
+    static let runtimeDirectoryName = "herdr-tavern-dev"
+    #else
+    static let runtimeDirectoryName = "herdr-tavern"
+    #endif
+
+    static var bundledExecutableURL: URL {
+        Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/herdr-tavern")
+    }
+
+    static func runtimeEnvironment(_ inherited: [String: String],
+                                   helpersDirectory: String = bundledExecutableURL.deletingLastPathComponent().path) -> [String: String] {
+        var environment = inherited.filter { !$0.key.hasPrefix("HERDR_") || $0.key.hasPrefix("HERDR_TAVERN_") }
+        let home = environment["HOME"] ?? FileManager.default.homeDirectoryForCurrentUser.path
         var directories = (environment["PATH"] ?? "").split(separator: ":").map(String.init)
-        for directory in [home + "/.cargo/bin", "/opt/homebrew/bin", "/usr/local/bin",
-                          HerdrInstaller.executableURL.deletingLastPathComponent().path] {
+        directories.removeAll { $0 == helpersDirectory }
+        directories.insert(helpersDirectory, at: 0)
+        for directory in [home + "/.cargo/bin", "/opt/homebrew/bin", "/usr/local/bin"] {
             if !directories.contains(directory) { directories.append(directory) }
         }
         environment["PATH"] = directories.joined(separator: ":")
-        // Восстановленные панели наследуют окружение сервера, а не env запросов создания.
         environment["PI_FORCE_IMAGE_PROTOCOL"] = "kitty"
         return environment
-    }()
+    }
 
-    static func parse(_ arguments: [String]) throws -> LaunchOptions {
+    static var serverEnvironment: [String: String] { runtimeEnvironment(ProcessInfo.processInfo.environment) }
+
+    static func configURL(environment: [String: String] = ProcessInfo.processInfo.environment) -> URL {
+        if let path = environment["HERDR_TAVERN_CONFIG_PATH"] { return URL(fileURLWithPath: path) }
+        return configDirectory(environment: environment).appendingPathComponent("config.toml")
+    }
+
+    private static func configDirectory(environment: [String: String]) -> URL {
+        let home = environment["HOME"] ?? FileManager.default.homeDirectoryForCurrentUser.path
+        return URL(fileURLWithPath: environment["XDG_CONFIG_HOME"] ?? home + "/.config")
+            .appendingPathComponent(runtimeDirectoryName)
+    }
+
+    static func parse(_ arguments: [String], environment: [String: String] = ProcessInfo.processInfo.environment) throws -> LaunchOptions {
         var socket: String?, executable: String?, session: String?
         var index = 1
         while index < arguments.count {
             let option = arguments[index]
             if option.hasPrefix("-psn_") { index += 1; continue }
-            guard ["--socket", "--herdr", "--session"].contains(option), index + 1 < arguments.count else {
+            guard ["--socket", "--herdr-tavern", "--session"].contains(option), index + 1 < arguments.count else {
                 throw NativeError.message(L("core.launch.arguments"))
             }
             let value = arguments[index + 1]
             guard !value.isEmpty else { throw NativeError.message(L("core.launch.emptyValue", option)) }
-            switch option { case "--socket": socket = value; case "--herdr": executable = value; default: session = value }
+            switch option { case "--socket": socket = value; case "--herdr-tavern": executable = value; default: session = value }
             index += 2
         }
-        let environment = ProcessInfo.processInfo.environment
-        let selectedSession = session ?? (socket == nil && environment["HERDR_SOCKET_PATH"] == nil ? environment["HERDR_SESSION"] : nil)
+        let selectedSession = session ?? (socket == nil && environment["HERDR_TAVERN_SOCKET_PATH"] == nil ? environment["HERDR_TAVERN_SESSION"] : nil)
         if let name = selectedSession {
-            guard name.utf8.count <= 64, name.unicodeScalars.allSatisfy({ scalar in
+            guard !name.isEmpty, name.utf8.count <= 64, name.unicodeScalars.allSatisfy({ scalar in
                 scalar.isASCII && (CharacterSet.alphanumerics.contains(scalar) || "_-".unicodeScalars.contains(scalar))
             }) else { throw NativeError.message(L("core.launch.invalidSession")) }
         }
-        let home = environment["HOME"] ?? FileManager.default.homeDirectoryForCurrentUser.path
-        var directory = URL(fileURLWithPath: environment["XDG_CONFIG_HOME"] ?? home + "/.config").appendingPathComponent("herdr")
+        var directory = configDirectory(environment: environment)
         if let name = selectedSession, name != "default" { directory.appendPathComponent("sessions"); directory.appendPathComponent(name) }
         let api: String
         let client: String
@@ -358,31 +378,32 @@ struct LaunchOptions {
             client = NSString(string: socket).expandingTildeInPath
             let url = URL(fileURLWithPath: client)
             let stem = url.deletingPathExtension().lastPathComponent
-            let apiStem = stem.hasSuffix("-client") ? String(stem.dropLast(7)) : "herdr"
+            let apiStem = stem.hasSuffix("-client") ? String(stem.dropLast(7)) : "herdr-tavern"
             api = url.deletingLastPathComponent().appendingPathComponent(apiStem + ".sock").path
-        } else if session == nil, let override = environment["HERDR_SOCKET_PATH"] {
+        } else if session == nil, let override = environment["HERDR_TAVERN_SOCKET_PATH"] {
             api = override
             let url = URL(fileURLWithPath: override)
             client = url.deletingLastPathComponent().appendingPathComponent(url.deletingPathExtension().lastPathComponent + "-client" + (url.pathExtension.isEmpty ? "" : "." + url.pathExtension)).path
         } else {
-            api = directory.appendingPathComponent("herdr.sock").path
-            client = session == nil ? environment["HERDR_CLIENT_SOCKET_PATH"] ?? directory.appendingPathComponent("herdr-client.sock").path : directory.appendingPathComponent("herdr-client.sock").path
+            api = directory.appendingPathComponent("herdr-tavern.sock").path
+            client = session == nil ? environment["HERDR_TAVERN_CLIENT_SOCKET_PATH"] ?? directory.appendingPathComponent("herdr-tavern-client.sock").path : directory.appendingPathComponent("herdr-tavern-client.sock").path
         }
         return LaunchOptions(socketPath: client, publicSocketPath: api, connectOnly: socket != nil, herdrPath: executable, session: selectedSession)
     }
-    func resolveExecutable() throws -> String {
+    func resolveExecutable(bundledURL: URL = LaunchOptions.bundledExecutableURL) throws -> String {
         let manager = FileManager.default
+        func isExecutableFile(_ path: String) -> Bool {
+            var isDirectory: ObjCBool = false
+            return manager.fileExists(atPath: path, isDirectory: &isDirectory)
+                && !isDirectory.boolValue && manager.isExecutableFile(atPath: path)
+        }
         if let herdrPath {
             let path = NSString(string: herdrPath).expandingTildeInPath
-            guard manager.isExecutableFile(atPath: path) else { throw NativeError.message(L("core.launch.notExecutable", path)) }
+            guard isExecutableFile(path) else { throw NativeError.message(L("core.launch.notExecutable", path)) }
             return path
         }
-        let directories = (Self.serverEnvironment["PATH"] ?? "").split(separator: ":").map(String.init)
-        for directory in directories {
-            let path = URL(fileURLWithPath: directory).appendingPathComponent("herdr").path
-            if manager.isExecutableFile(atPath: path) { return path }
-        }
-        throw NativeError.herdrNotFound
+        guard isExecutableFile(bundledURL.path) else { throw NativeError.herdrNotFound }
+        return bundledURL.path
     }
     private func serverIsListening() throws -> Bool {
         var address = sockaddr_un()
@@ -412,15 +433,19 @@ struct LaunchOptions {
         throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
     }
 
-    func ensureServer() throws {
+    func ensureServer(logDirectory: URL? = nil) throws {
         guard !connectOnly else { return }
         guard try !serverIsListening() else { return }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: try resolveExecutable())
-        process.environment = Self.serverEnvironment
+        var environment = Self.serverEnvironment
+        environment["HERDR_TAVERN_SOCKET_PATH"] = publicSocketPath
+        environment["HERDR_TAVERN_CLIENT_SOCKET_PATH"] = socketPath
+        environment.removeValue(forKey: "HERDR_TAVERN_SESSION")
+        process.environment = environment
         process.arguments = ["server"] + (session.map { ["--session", $0] } ?? [])
         process.standardInput = FileHandle.nullDevice
-        let logs = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first!
+        let logs = logDirectory ?? FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first!
             .appendingPathComponent("Logs/HerdrTavern", isDirectory: true)
         try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
         let logURL = logs.appendingPathComponent("server.log")

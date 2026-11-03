@@ -184,6 +184,12 @@ crates/herdr-protocol/PROVENANCE.json and crates/herdr-protocol/LICENSE.
 The server startup adaptation is also credited in app/Connection.swift.
 Rust dependency notices: licenses/RustDependencies.txt.
 Vendored crate provenance: vendor/crates/PROVENANCE.json.
+The bundled herdr-tavern runtime is a modified distribution of herdr v0.9.5.
+Its source, original Apache-2.0 license and provenance are in vendor/herdr/.
+Runtime identity, integration paths and update behavior are modified for
+Herdr Tavern; this is not an official herdr release.
+Original runtime dependency license texts are packaged under
+Contents/Resources/Licenses/herdr-tavern/ in the application.
 Third-party development skills retain their own LICENSE/NOTICE files in
 .agents/skills/; this document does not relicense them.
 

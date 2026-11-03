@@ -95,7 +95,7 @@
 "settings.integration.path" = "Путь интеграции: %@";
 "settings.integration.unknownTarget" = "Новый target herdr: доступен только просмотр. Tavern ещё не знает правил его настройки.";
 "settings.integration.experimental" = "Экспериментальная интеграция herdr (CLI-only).";
-"settings.integration.unknownRules" = "Tavern не знает правил интеграции %@; используйте штатный CLI herdr.";
+"settings.integration.unknownRules" = "Tavern не знает правил интеграции %@; используйте встроенный CLI herdr-tavern.";
 "settings.integration.agentUnavailable" = "Указанный исполняемый файл агента недоступен: %@";
 "settings.integration.unsupported" = "Выбранный herdr не поддерживает интеграцию %@.";
 "settings.integration.emptyResult" = "herdr завершился без описания результата. Проверьте статус перед повторной операцией.";

@@ -1,6 +1,7 @@
 [workspace]
 members = ["crates/herdr-protocol", "crates/tavern-client", "tools/import-protocol"]
 default-members = ["crates/herdr-protocol", "crates/tavern-client"]
+exclude = ["vendor/herdr"]
 resolver = "2"
 
 [workspace.package]

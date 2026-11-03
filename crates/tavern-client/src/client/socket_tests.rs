@@ -36,7 +36,7 @@ fn welcome_json() -> Value {
 }
 pub(super) fn snapshot_json() -> Value {
     json!({"boot_id":"boot","revision":1,"config_diagnostic":null,"product_announcement":null,"update_available":null,
-        "update_install_command":"herdr update","server_keybindings_toml":null,"latest_release_notes_available":false,
+        "update_install_command":"herdr-tavern update","server_keybindings_toml":null,"latest_release_notes_available":false,
         "integration_updates_available":false,"worktree_directory":"","release_notes":null,"focused_workspace_id":null,
         "focused_tab_id":null,"focused_pane_id":null,"tab_bar_right":[],"tab_bar_right_separator":"","agent_view_label":null,
         "agent_order":[],"workspaces":[],"tabs":[],"panes":[],"agents":[],"commands":[],"future_optional":{"enabled":true}})

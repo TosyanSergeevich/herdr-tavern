@@ -6,11 +6,11 @@
 
 - **macOS 14 or later.** Builds target the current machine's architecture; they are not universal binaries.
 - **Xcode Command Line Tools** providing `xcrun swiftc`.
-- **Rust stable through rustup**, with Cargo.
-- **Herdr at runtime.** Tavern can offer to install it if it is missing; manual installation is also supported. Current features have been checked with **0.9.4**; compatibility with arbitrary newer versions is not guaranteed.
+- **Rust stable and 1.96.1 through rustup**, with Cargo.
+- **Zig 0.16.0** on `PATH` or an executable path in `ZIG`; **Python 3** for collecting dependency license texts.
 - **A local signing certificate**, configured below.
 
-Herdr is not included in the app bundle. Agent programs and model access are configured separately. Python and an image generator are not needed for a normal build.
+The app includes its isolated `herdr-tavern` runtime. Agent programs and model access are configured separately. No artwork generator is needed.
 
 All supplied fonts are included in `resources/Fonts/` and copied into the `.app` by the build, without downloading fonts or reading local font installations. Tavern loads them from its resources at startup; no manual font installation is required. The terminal uses Iosevka Custom **34.9.0** (nine weights from Thin to Heavy, with real Oblique faces) and Symbols Nerd Font; the decorative interface fonts are bundled too. System Menlo and emoji fallbacks remain provided by macOS.
 
@@ -29,7 +29,7 @@ Run these commands from the repository root, not from `docs/`:
 open "build/Herdr Tavern.app"
 ```
 
-The first build may need network access to download Cargo dependencies. With a populated cache, use `CARGO_NET_OFFLINE=true ./build.sh`. The script builds the app and verifies its signature; it does not run tests.
+The first build may need network access to download Cargo and Zig dependencies. With populated caches, Cargo can run with `CARGO_NET_OFFLINE=true`. The script builds the app and bundled runtime and verifies their signatures; it does not run tests.
 
 The build uses the committed runtime PNGs; no artwork generation is required. It assembles a clean temporary bundle and replaces `build/Herdr Tavern.app` only after compilation, signing, and signature verification succeed. Artwork masters and preparation scripts are not bundled.
 
@@ -37,17 +37,13 @@ The Cargo release profile explicitly sets `strip = "none"` to avoid an [LLVM dyl
 
 The build remaps local source, home, Cargo, and Rust toolchain paths to relative prefixes in the compiled app, including the linker's debug map. Runtime file access is unchanged; resource provenance uses source-bundle and artifact names rather than personal directory paths.
 
-## Install herdr
+## Bundled runtime
 
-Every launch checks for herdr. If it is missing, Tavern asks for permission to download the official **0.9.4** release from GitHub, verifies its SHA256 checksum, and installs it at `~/Library/Application Support/HerdrTavern/bin/herdr`. This is a pinned release, not `latest`; download starts only after confirmation.
+The build compiles `vendor/herdr/` and packages `Contents/Helpers/herdr-tavern`. There is no startup download or lookup of upstream `herdr`. A missing bundled executable is a packaging error; reinstall the complete Tavern application.
 
-This installation is for Tavern only and requires no administrator privileges. The installer does not install herdr system-wide or through Homebrew, modify existing installations, or change shell profiles or `PATH` outside Tavern. An already found herdr is used without downloading, overwriting, or updating it.
+The runtime uses `~/.config/herdr-tavern/` (under `XDG_CONFIG_HOME` when set), separate sockets and `HERDR_TAVERN_*` variables. Existing upstream configuration and sessions are not migrated. The Helpers directory is first on the PATH inherited by new panes, making `herdr-tavern` available there without installing it system-wide.
 
-Cancelling the initial offer installs nothing and ends that launch. There is no “do not ask again” setting: if herdr is still missing at the next launch, the offer appears again. After a successful installation, startup continues without a manual restart.
-
-Alternatively, follow the [herdr installation instructions](https://github.com/herdrdev/herdr#readme) and make the executable available to Tavern, or choose it explicitly with `--herdr PATH`. An invalid explicit path is an error, not permission to silently select or install another executable.
-
-On launch, Tavern connects to an existing herdr session or starts a server if its socket is absent. A stale socket is not removed automatically: the app reports a connection error. Server startup log: `~/Library/Logs/HerdrTavern/server.log`.
+Tavern connects to its own running server or starts the bundled runtime when no server listens. Connect-only `--socket` never starts a server or removes sockets. Startup log: `~/Library/Logs/HerdrTavern/server.log`. Runtime updates are delivered with Tavern, not through upstream's updater.
 
 ## Choose a session or server
 
@@ -59,11 +55,11 @@ To use a separate session, from the repository root:
 
 | Argument | Purpose |
 | --- | --- |
-| `--session NAME` | Select a named herdr session. |
-| `--herdr PATH` | Use this explicit herdr executable; an invalid path is an error, with no fallback or installation offer. |
+| `--session NAME` | Select a named herdr-tavern session. |
+| `--herdr-tavern PATH` | Use an explicit custom runtime executable for development; an invalid path is an error, without fallback. |
 | `--socket PATH` | Connect to a client socket without automatically starting a server. |
 
-Without explicit arguments, Tavern takes `HERDR_SESSION`, `HERDR_SOCKET_PATH`, `HERDR_CLIENT_SOCKET_PATH`, and `XDG_CONFIG_HOME` into account. When starting a server, it adds standard Cargo and Homebrew directories to `PATH`, but does not read shell configuration or change an already running server's environment.
+Without explicit arguments, Tavern takes `HERDR_TAVERN_SESSION`, `HERDR_TAVERN_SOCKET_PATH`, `HERDR_TAVERN_CLIENT_SOCKET_PATH`, and `XDG_CONFIG_HOME` into account. Upstream `HERDR_*` variables are not used. When starting a server, it prepends the bundled Helpers directory and adds standard Cargo and Homebrew directories to `PATH`, but does not read shell configuration or change an already running server's environment.
 
 Tavern also sets `PI_FORCE_IMAGE_PROTOCOL=kitty` when starting a server so omp can display images in both new and restored panes. All panes on that server inherit this setting, even with other clients attached. It does not update existing servers or processes, including servers reached through `--socket`; applying the setting there requires restarting them with the variable set.
 

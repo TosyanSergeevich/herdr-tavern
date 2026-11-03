@@ -7,12 +7,12 @@
 "core.connection.emptyEvent" = "The client returned an empty event.";
 "core.connection.closed" = "The connection is closed.";
 "core.connection.invalidAPIResponse" = "Invalid public API response.";
-"core.launch.arguments" = "Arguments: --socket PATH (connect only), --herdr PATH, --session NAME";
+"core.launch.arguments" = "Arguments: --socket PATH (connect only), --herdr-tavern PATH, --session NAME";
 "core.launch.emptyValue" = "Empty value for %@";
-"core.launch.invalidSession" = "Invalid herdr session name.";
-"core.launch.notExecutable" = "herdr is not executable: %@";
-"core.launch.herdrNotFound" = "herdr was not found. Install herdr or specify --herdr PATH.";
-"core.launch.socketTimeout" = "herdr did not create a socket within 15 seconds. Log: %@";
+"core.launch.invalidSession" = "Invalid herdr-tavern session name.";
+"core.launch.notExecutable" = "herdr-tavern is not executable: %@";
+"core.launch.herdrNotFound" = "The bundled herdr-tavern runtime is missing or not executable (Contents/Helpers/herdr-tavern). Reinstall or rebuild the complete application.";
+"core.launch.socketTimeout" = "herdr-tavern did not create a socket within 15 seconds. Log: %@";
 "core.surface.fontUnavailable" = "Could not load the bundled font %@. Rebuild the application with its font resources.";
 "core.surface.terminal" = "herdr terminal";
 "core.surface.invalidAssetSize" = "Invalid graphics resource dimensions.";

@@ -192,6 +192,11 @@ crates/herdr-protocol/PROVENANCE.json и crates/herdr-protocol/LICENSE.
 Уведомления о Rust-зависимостях — licenses/RustDependencies.ru.txt;
 оригинальные английские тексты — licenses/RustDependencies.txt;
 происхождение vendored crates — vendor/crates/PROVENANCE.json.
+Встроенный herdr-tavern — модифицированная поставка herdr v0.9.5.
+Исходники, оригинальная лицензия Apache-2.0 и происхождение — vendor/herdr/.
+Для Herdr Tavern изменены идентичность runtime, пути интеграций и обновление;
+это не официальный релиз herdr. Оригинальные тексты лицензий зависимостей
+runtime входят в Contents/Resources/Licenses/herdr-tavern/ приложения.
 Сторонние навыки разработки сохраняют собственные LICENSE/NOTICE
 в .agents/skills/; они не перелицензируются этим документом.
 
