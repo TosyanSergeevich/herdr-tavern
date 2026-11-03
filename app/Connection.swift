@@ -1,5 +1,6 @@
 import Foundation
 import CoreGraphics
+import Darwin
 
 // Apache-2.0: native rendering and input behavior adapted from the herdr surface
 // research for upstream revision 2563803dca97c040beaf3dc3acdcb5a3221b4238.
@@ -383,8 +384,37 @@ struct LaunchOptions {
         }
         throw NativeError.herdrNotFound
     }
+    private func serverIsListening() throws -> Bool {
+        var address = sockaddr_un()
+        address.sun_family = sa_family_t(AF_UNIX)
+        let path = socketPath.utf8CString
+        guard path.count <= MemoryLayout.size(ofValue: address.sun_path) else {
+            throw POSIXError(.ENAMETOOLONG)
+        }
+        withUnsafeMutableBytes(of: &address.sun_path) { destination in
+            path.withUnsafeBytes { destination.copyBytes(from: $0) }
+        }
+        address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
+        let descriptor = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        defer { Darwin.close(descriptor) }
+        guard fcntl(descriptor, F_SETFL, O_NONBLOCK) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        let result = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(descriptor, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        if result == 0 { return true }
+        let code = errno
+        if code == ENOENT || code == ECONNREFUSED { return false }
+        throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
+    }
+
     func ensureServer() throws {
-        guard !connectOnly, !FileManager.default.fileExists(atPath: socketPath) else { return }
+        guard !connectOnly else { return }
+        guard try !serverIsListening() else { return }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: try resolveExecutable())
         process.environment = Self.serverEnvironment
@@ -396,15 +426,17 @@ struct LaunchOptions {
         let logURL = logs.appendingPathComponent("server.log")
         if !FileManager.default.fileExists(atPath: logURL.path) { FileManager.default.createFile(atPath: logURL.path, contents: nil) }
         let handle = try FileHandle(forWritingTo: logURL); try handle.seekToEnd()
+        defer { try? handle.close() }
         process.standardOutput = handle; process.standardError = handle
         try process.run()
         // Only initial socket readiness is awaited. No mutation or failed handshake
         // is retried; a server started here remains alive after the window detaches.
-        let deadline = Date().addingTimeInterval(15)
-        while !FileManager.default.fileExists(atPath: socketPath) && Date() < deadline && process.isRunning { Thread.sleep(forTimeInterval: 0.05) }
-        try handle.close()
-        guard FileManager.default.fileExists(atPath: socketPath) else {
-            throw NativeError.message(L("core.launch.socketTimeout", logURL.path))
-        }
+        let deadline = DispatchTime.now() + .seconds(15)
+        repeat {
+            if try serverIsListening() { return }
+            guard process.isRunning, DispatchTime.now() < deadline else { break }
+            Thread.sleep(forTimeInterval: 0.05)
+        } while true
+        throw NativeError.message(L("core.launch.socketTimeout", logURL.path))
     }
 }
